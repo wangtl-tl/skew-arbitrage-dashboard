@@ -18,8 +18,8 @@ import requests
 BASE = os.environ.get("SKEW_MONITOR_BASE", "http://localhost:18080")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
 TIMEOUT = 25
-POLL_ATTEMPTS = 30     # 轮询上限(防止无限等待)
-POLL_INTERVAL = 10     # 每次间隔(秒)
+POLL_ATTEMPTS = 12     # 轮询上限(~100s, 适配自动化执行超时)
+POLL_INTERVAL = 8      # 每次间隔(秒)
 PLATEAU = 2            # 连续 N 次不增长即视为到达峰值, 停止轮询
 EARLY_STOP = 50        # 达到该数量提前结束(已较完整)
 MIN_PUSH = 10          # 低于此品种数视为监控异常, 不写入(保留上次好数据)
