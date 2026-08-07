@@ -1,0 +1,2161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>商品期权偏度套利监控</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+/* ── OpenVlab 极简白底风格 ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #FFFFFF; color: #2C3E50; font-size: 13px; line-height: 1.5;
+}
+a { color: #3498DB; text-decoration: none; }
+
+/* ── 状态栏 ── */
+.status-bar {
+  display: flex; align-items: center; gap: 20px; padding: 8px 16px;
+  background: #FAFAFA; border-bottom: 1px solid #E0E0E0; font-size: 12px;
+  position: sticky; top: 0; z-index: 100;
+}
+.status-bar .dot {
+  width: 8px; height: 8px; border-radius: 0; display: inline-block; margin-right: 4px;
+  background: #BDC3C7;
+}
+.dot.green { background: #27AE60; }
+.dot.yellow { background: #F39C12; }
+.dot.red { background: #E74C3C; }
+.status-item { display: flex; align-items: center; gap: 4px; }
+.status-divider { width: 1px; height: 16px; background: #E0E0E0; }
+.btn {
+  padding: 4px 12px; border: 1px solid #BDC3C7; background: #FFFFFF; color: #2C3E50;
+  cursor: pointer; font-size: 12px; font-family: inherit; border-radius: 0;
+}
+.btn:hover { background: #EBF5FB; border-color: #3498DB; }
+.btn-primary { background: #3498DB; color: #fff; border-color: #3498DB; }
+.btn-primary:hover { background: #2980B9; }
+.btn-sm { padding: 2px 8px; font-size: 11px; }
+.signal-count { font-weight: 700; font-size: 14px; }
+.signal-count.active { color: #E74C3C; animation: blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+.delay-tag { background: #FFF3CD; color: #856404; padding: 1px 6px; font-size: 11px; border: 1px solid #FFEEBA; }
+
+/* ── 筛选栏 ── */
+.filter-bar {
+  display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+  border-bottom: 1px solid #E0E0E0; flex-wrap: wrap;
+}
+.filter-bar label { font-size: 12px; color: #7F8C8D; white-space: nowrap; }
+.filter-bar select, .filter-bar input[type="range"] { font-size: 12px; border: 1px solid #E0E0E0; padding: 2px 6px; }
+.filter-bar input[type="range"] { width: 100px; }
+
+/* ── 自选监控栏 ── */
+.watchlist-bar {
+  padding: 6px 16px; background: #FCFAF2; border-bottom: 1px solid #E0E0E0;
+  display: none; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px;
+}
+.watchlist-bar .wl-card {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; background: #FFF; border: 1px solid #E8E8E8;
+  cursor: pointer; white-space: nowrap;
+}
+.watchlist-bar .wl-card:hover { border-color: #3498DB; background: #EBF5FB; }
+.watchlist-bar .wl-card .wl-name { font-weight: 700; font-size: 13px; }
+.watchlist-bar .wl-card .wl-price { color: #7F8C8D; }
+.watchlist-bar .wl-card .wl-tag { padding: 1px 5px; font-size: 10px; border-radius: 2px; }
+.wl-tag.entry-triggered { background: #27AE60; color: #FFF; }
+.wl-tag.entry-partial { background: #F39C12; color: #FFF; }
+.wl-tag.stop-alert { background: #E74C3C; color: #FFF; animation: blink 1s infinite; }
+.wl-tag.tp-alert { background: #2ECC71; color: #FFF; }
+.watchlist-bar .wl-empty { color: #BDC3C7; font-size: 12px; }
+
+/* ── 主表格 ── */
+.table-container { padding: 0 16px; overflow-x: auto; max-height: calc(100vh - 160px); overflow-y: auto; }
+table.main-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+table.main-table th {
+  background: #F5F6FA; color: #7F8C8D; font-weight: 600; padding: 8px 6px;
+  text-align: left; border-bottom: 2px solid #E0E0E0; cursor: pointer;
+  white-space: nowrap;
+}
+table.main-table th:hover { color: #2C3E50; }
+table.main-table th .sort-arrow { margin-left: 2px; font-size: 10px; }
+/* ── 两行表头纵向 sticky(关键: 用 <th> sticky 而非 <tr> sticky)
+   原因: <tr> position:sticky 在 Chrome/Edge 上不生效(规范层面 sticky 是
+         cell-level, 不是 row-level), 之前改用 tr 导致 group 行完全不显示。
+         改回 <th> sticky 后, z-index 必须严格分层避免 col-freeze 穿透:
+            grp-* th     (5) 分组行 — 永远在顶
+            grp col-fz   (6) 分组行冻结列(colspan=7, 占左 7 列) — 最顶
+            detail col-fz(4) 明细行冻结列 — 在明细之上、分组之下
+            detail th    (3) 明细行 — 在分组下方
+            body col-fz  (2) body 冻结列
+   detail 行 top 由 JS 测量 grp 实际高度后写 --group-header-h,
+   避免固定 33px 与实际高度不一致时穿过 group 行 */
+table.main-table thead tr.header-group th {
+  position: sticky; top: 0; z-index: 5;
+}
+table.main-table thead tr.header-detail th {
+  position: sticky; top: var(--group-header-h, 34px); z-index: 3; background: #FCFCFD;
+}
+/* 上行分组表头(色带 + 居中 + 粗体) */
+table.main-table thead tr.header-group th {
+  text-align: center; font-weight: 700; font-size: 12.5px;
+  border-bottom: 1px solid #E0E0E0; padding: 7px 6px;
+}
+table.main-table thead tr.header-group th.grp-indep { background: #F5F6FA; color: #2C3E50; }
+table.main-table thead tr.header-group th.grp-front { background: #E8F8F5; color: #1E8449; border-left: 1px solid #D5DBDB; }
+table.main-table thead tr.header-group th.grp-far   { background: #FDEBD0; color: #B9770E; border-left: 1px solid #D5DBDB; }
+table.main-table thead tr.header-group th.grp-aux  { background: #F4F6F7; color: #566573; border-left: 1px solid #D5DBDB; }
+/* 分组行内首个 th(colspan=7 覆盖基础信息)做水平冻结, z-index 比非冻结分组高 */
+table.main-table thead tr.header-group th.grp-indep {
+  position: sticky; top: 0; left: 0; z-index: 6; background: #F5F6FA; color: #2C3E50;
+  box-shadow: 1px 0 0 #E0E0E0;
+}
+/* 下行明细表头在分组下方(已在 tr.header-detail th 中统一设 background, 此处无需再覆盖) */
+table.main-table td {
+  padding: 6px; border-bottom: 1px solid #F0F0F0; white-space: nowrap;
+}
+table.main-table tr:hover { background: #EBF5FB; }
+table.main-table tr.row-red { background: #FDEDEC; }
+table.main-table tr.row-green { background: #E8F8F5; }
+/* ── 冻结列(基础信息7列, Excel 式): 横向滚动时左 7 列钉住 ──
+   注意: detail 行 col-freeze z-index 必须 < group 行 (5),
+   否则会"穿透"到 group 行之上, 导致只看到 col-freeze 内容而看不到分组色带 */
+table.main-table th.col-freeze, table.main-table td.col-freeze {
+  position: sticky; left: 0; z-index: 2;
+  background: #FCFCFD;  /* 覆盖在其它列之上, 用与明细表头一致的底色 */
+  box-shadow: 1px 0 0 #E0E0E0;  /* 右侧分隔线, 提示冻结边界 */
+}
+table.main-table thead tr.header-detail th.col-freeze { z-index: 4; background: #FCFCFD; }
+/* body 行冻结列在 hover / row-red / row-green 状态时也保持白底, 否则会被行色覆盖 */
+table.main-table tr:hover td.col-freeze { background: #EBF5FB; }
+table.main-table tr.row-red td.col-freeze { background: #FDEDEC; }
+table.main-table tr.row-green td.col-freeze { background: #E8F8F5; }
+table.main-table tr.row-zig td.col-freeze { background: #FCF3CF; }
+table.main-table tr.row-gray { background: #F8F9FA; color: #BDC3C7; }
+table.main-table tr.row-active { cursor: pointer; }
+.val-bold { font-weight: 700; }
+.val-red { color: #E74C3C; }
+.val-green { color: #27AE60; }
+.val-yellow { color: #F39C12; }
+.val-gray { color: #BDC3C7; }
+/* [偏度醒目] IV_Skew 列专用: 更亮更饱和的红/绿, 加粗到 800 让数字一眼能扫到 */
+.skew-bright.val-red { color: #FF1744; font-weight: 800; }
+.skew-bright.val-green { color: #00C853; font-weight: 800; }
+/* [25Δ基准行高亮] 主行(25Δ基准)=整行淡黄, 配对行(delta≠25)=整行淡蓝; 覆盖冻结列 */
+/* 同时作用于主表(main-table)与详情期权链(option-chain), 颜色加强到可一眼辨识 */
+table.main-table tr.row-base td,
+table.main-table tr.row-base td.col-freeze,
+.option-chain table tr.row-benchmark td,
+.option-chain table tr.row-benchmark td.col-freeze { background: #FFECB3; }
+table.main-table tr.row-pair td,
+table.main-table tr.row-pair td.col-freeze,
+.option-chain table tr.row-selpair td,
+.option-chain table tr.row-selpair td.col-freeze { background: #D6EAF8; }
+/* hover 时保持行底色(否则会被 tr:hover 蓝覆盖冻结列, 主表基准列变蓝) */
+table.main-table tr.row-base:hover td,
+table.main-table tr.row-base:hover td.col-freeze,
+.option-chain table tr.row-benchmark:hover td,
+.option-chain table tr.row-benchmark:hover td.col-freeze { background: #FFE09A; }
+table.main-table tr.row-pair:hover td,
+table.main-table tr.row-pair:hover td.col-freeze,
+.option-chain table tr.row-selpair:hover td,
+.option-chain table tr.row-selpair:hover td.col-freeze { background: #C3DEF9; }
+
+/* ── 表头字段说明 tooltip ── */
+.th-tooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 260px;
+  padding: 8px 10px;
+  background: #2C3E50;
+  color: #FFFFFF;
+  font-size: 11px;
+  line-height: 1.5;
+  border-radius: 0;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+}
+.th-tooltip::after {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 0 5px 5px 5px;
+  border-style: solid;
+  border-color: transparent transparent #2C3E50 transparent;
+}
+.th-tooltip.visible {
+  opacity: 1;
+  visibility: visible;
+}
+table.main-table th[data-tooltip] {
+  position: relative;
+}
+table.main-table th[data-tooltip]::after {
+  content: '?';
+  display: inline-block;
+  margin-left: 4px;
+  width: 12px;
+  height: 12px;
+  line-height: 12px;
+  text-align: center;
+  font-size: 9px;
+  color: #BDC3C7;
+  border: 1px solid #BDC3C7;
+  border-radius: 0;
+}
+table.main-table th[data-tooltip]:hover::after {
+  color: #3498DB;
+  border-color: #3498DB;
+}
+
+.tag {
+  display: inline-block; padding: 1px 5px; font-size: 10px; border: 1px solid;
+  white-space: nowrap;
+}
+.tag-green { background: #D5F5E3; color: #1E8449; border-color: #A9DFBF; }
+.tag-red { background: #FADBD8; color: #C0392B; border-color: #F5B7B1; }
+.tag-yellow { background: #FCF3CF; color: #7D6608; border-color: #F9E79F; }
+.tag-blue { background: #D6EAF8; color: #2471A3; border-color: #AED6F1; }
+.tag-gray { background: #F2F3F4; color: #7F8C8D; border-color: #E5E7E9; }
+.tag-recommend { font-weight: 700; font-size: 13px; }
+
+.arrow-up { color: #E74C3C; }
+.arrow-down { color: #27AE60; }
+
+/* ── 侧滑面板 ── */
+.overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.3); z-index: 200; }
+.overlay.open { display: block; }
+.slide-panel {
+  position: fixed; top: 0; right: -880px; width: 880px; height: 100%;
+  background: #FFFFFF; box-shadow: -4px 0 20px rgba(0,0,0,0.15);
+  transition: right 0.25s ease; z-index: 201; overflow-y: auto;
+  display: flex; flex-direction: column;
+}
+.slide-panel.open { right: 0; }
+.panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid #E0E0E0;
+  background: #FAFAFA; position: sticky; top: 0; z-index: 2;
+}
+.panel-header h3 { font-size: 15px; font-weight: 600; }
+.panel-close {
+  background: none; border: none; font-size: 20px; cursor: pointer;
+  color: #7F8C8D; padding: 4px 8px;
+}
+.panel-close:hover { color: #E74C3C; }
+.panel-body { padding: 16px; flex: 1; overflow-y: auto; }
+
+/* ── 指标卡 ── */
+.metric-cards {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  margin-bottom: 16px;
+}
+.metric-card {
+  padding: 10px 12px; border: 1px solid #E0E0E0; background: #FAFAFA;
+}
+.metric-card .label { font-size: 11px; color: #7F8C8D; margin-bottom: 2px; }
+.metric-card .value { font-size: 18px; font-weight: 700; }
+.metric-card.sub { font-size: 11px; color: #95A5A6; }
+.metric-card.blink-red { animation: blink 1s infinite; background: #FDEDEC; border-color: #E74C3C; }
+.metric-card.blink-green { animation: blink 1s infinite; background: #E8F8F5; border-color: #27AE60; }
+
+/* ── 期权链 + 图表区 ── */
+.chain-chart-row { display: flex; gap: 12px; margin-bottom: 16px; }
+.option-chain { flex: 0 0 420px; overflow-x: auto; }
+.option-chain table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.option-chain th { background: #F5F6FA; color: #7F8C8D; font-weight: 600; padding: 4px; text-align: center; border-bottom: 2px solid #E0E0E0; }
+.option-chain td { padding: 2px 4px; text-align: center; border-bottom: 1px solid #F0F0F0; }
+.option-chain .strike-col { background: #FAFAFA; font-weight: 700; font-size: 12px; min-width: 70px; border-left: 1px solid #E0E0E0; border-right: 1px solid #E0E0E0; }
+.option-chain .row-benchmark { background: #FFF9E6; }
+.option-chain .row-benchmark td.strike-col { background: #FFF3CD; }
+.option-chain .tag-benchmark { font-size: 9px; color: #B7950B; display: block; }
+.option-chain .row-selpair { background: #E8F5E9; }
+.option-chain .row-selpair td.strike-col { background: #C8E6C9; }
+.option-chain .tag-selpair { font-size: 9px; color: #1B5E20; display: block; }
+.chart-area { flex: 1; min-width: 350px; }
+
+.chart-tabs { display: flex; gap: 0; flex-wrap: wrap; margin-bottom: 8px; border-bottom: 2px solid #E0E0E0; }
+.chart-tab {
+  padding: 6px 12px; font-size: 12px; cursor: pointer; border: none; background: none;
+  color: #7F8C8D; font-family: inherit; border-bottom: 2px solid transparent; margin-bottom: -2px;
+  white-space: nowrap;
+}
+.chart-tab.active { color: #2C3E50; border-bottom-color: #3498DB; font-weight: 600; }
+.chart-help {
+  margin-left: 4px; padding: 0; width: 14px; height: 14px; font-size: 9px;
+  cursor: pointer; border: 1px solid #D5D8DC; background: transparent;
+  color: #95A5A6; border-radius: 50%; line-height: 12px;
+  font-family: inherit; margin-bottom: 0; vertical-align: middle;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.chart-help:hover { background: #3498DB; color: #FFF; border-color: #3498DB; }
+.chart-container { width: 100%; height: 350px; }
+.lot-selector { display: flex; gap: 4px; margin-bottom: 4px; }
+.strategy-selector { }
+.strat-btn {
+  padding: 3px 10px; font-size: 11px; cursor: pointer; border: 1px solid #BDC3C7;
+  background: #FFF; color: #7F8C8D; border-radius: 3px; font-family: inherit;
+}
+.strat-btn:hover { border-color: #3498DB; color: #3498DB; }
+.strat-btn.active { background: #3498DB; color: #FFF; border-color: #3498DB; }
+.lot-btn {
+  padding: 2px 10px; font-size: 11px; border: 1px solid #E0E0E0; background: #fff;
+  cursor: pointer; font-family: inherit;
+}
+.lot-btn.active { background: #3498DB; color: #fff; border-color: #3498DB; }
+
+/* ── 策略详情 ── */
+.detail-section { margin-bottom: 12px; }
+.detail-section h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #2C3E50; }
+.detail-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.detail-table th { background: #F5F6FA; color: #7F8C8D; padding: 4px 8px; text-align: left; border-bottom: 1px solid #E0E0E0; }
+.detail-table td { padding: 4px 8px; border-bottom: 1px solid #F0F0F0; }
+
+/* ── 底部 ── */
+.footer-bar {
+  padding: 10px 16px; text-align: center; font-size: 11px; color: #BDC3C7;
+  border-top: 1px solid #E0E0E0; background: #FAFAFA;
+}
+
+/* ── 加载蒙层 ── */
+.loading-overlay {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 40px; color: #7F8C8D; font-size: 14px;
+}
+.loading-spinner {
+  width: 20px; height: 20px; border: 2px solid #E0E0E0;
+  border-top-color: #3498DB; animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── 响应式 ── */
+@media (max-width: 1200px) {
+  .slide-panel { width: 100%; right: -100%; }
+  .chain-chart-row { flex-direction: column; }
+  .option-chain { flex: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── 状态栏 ── -->
+<div class="status-bar" id="statusBar">
+  <div class="status-item">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText"></span>
+  </div>
+  <div class="status-divider"></div>
+  <div class="status-item">
+    <span>刷新: </span><span id="lastRefresh">--</span>
+  </div>
+  <div class="status-divider"></div>
+  <div class="status-item">
+    <span class="delay-tag" id="delayTag">延时约15分钟</span>
+  </div>
+  <div class="status-divider"></div>
+  <div class="status-item">
+    <span>快照: </span><span id="snapshotTime">—</span>
+  </div>
+  <div class="status-divider"></div>
+  <div class="status-item">
+    <span>品种: </span><strong id="totalProducts">0</strong>
+  </div>
+  <div class="status-divider"></div>
+  <div class="status-item">
+    <span>达标: </span><span class="signal-count" id="signalCount">0</span>
+  </div>
+  <div class="status-divider"></div>
+  <button class="btn btn-primary btn-sm" onclick="manualRefresh()">立即刷新</button>
+  <button class="btn btn-sm" id="soundBtn" onclick="toggleSound()">🔊 声音提醒</button>
+  <span style="margin-left:auto;font-size:11px;color:#BDC3C7;" id="currentTime"></span>
+</div>
+
+<!-- ── 筛选栏 ── -->
+<div class="filter-bar" id="filterBar">
+  <label>品种:</label>
+  <select id="filterProduct" onchange="applyFilters()">
+    <option value="">全部</option>
+  </select>
+  <label>交易所:</label>
+  <select id="filterExchange" onchange="applyFilters()">
+    <option value="">全部</option>
+    <option value="DCE">大商所</option>
+    <option value="CZCE">郑商所</option>
+    <option value="SHFE">上期所</option>
+    <option value="INE">上期能源</option>
+    <option value="CFFEX">中金所</option>
+    <option value="GFEX">广期所</option>
+  </select>
+  <label>偏度类型:</label>
+  <select id="filterSector" onchange="applyFilters()">
+    <option value="">全部</option>
+    <option value="agri">农产品型</option>
+    <option value="indust">工业品型</option>
+    <option value="chem">化工品型</option>
+    <option value="index">股指型</option>
+  </select>
+  <label>流动性:</label>
+  <select id="filterLiquidity" onchange="applyFilters()">
+    <option value="">全部</option>
+    <option value="A">A级</option>
+    <option value="A|B">A-B级</option>
+    <option value="A|B|C">A-C级</option>
+  </select>
+  <label>Skew阈值≥</label>
+  <input type="range" id="filterSkewMin" min="0" max="20" value="0" step="0.5" oninput="applyFilters()">
+  <span id="skewMinVal" style="font-size:12px;min-width:30px;">0%</span>
+  <label>Z值≥</label>
+  <input type="range" id="filterZMin" min="0" max="3" value="0" step="0.1" oninput="applyFilters()">
+  <span id="zMinVal" style="font-size:12px;min-width:24px;">0</span>
+  <button class="btn btn-sm" onclick="resetFilters()">重置筛选</button>
+</div>
+
+<!-- ── 自选监控栏 ── -->
+<div class="watchlist-bar" id="watchlistBar">
+  <span class="wl-empty" id="wlEmpty">⭐ 将品种加入自选后，此处显示关键指标与开仓/止盈/止损信号</span>
+</div>
+
+<!-- ── 主表格 ── -->
+<div class="table-container" id="tableContainer">
+  <div class="loading-overlay" id="tableLoading">
+    <div class="loading-spinner"></div>
+    <span>正在加载数据...</span>
+  </div>
+  <table class="main-table" id="mainTable" style="display:none;">
+      <thead>
+        <!-- 上行表头: 分组(近月基准/远月对比) + 独立列 -->
+        <tr class="header-group">
+          <th colspan="7" class="grp-indep" data-tooltip="品种/配对/合约/价格/流动性(独立于月份维度)。">基础信息</th>
+          <th colspan="6" class="grp-front" data-tooltip="近月A(主指标锚定月): 配对IVs/IV_Skew/Z/IV分位/偏度百分位/到期天。">近月基准 (主指标=A)</th>
+          <th colspan="6" class="grp-far" data-tooltip="远月B(对比月): 远月IV_Skew/远月Z/远月配对IVs/远月平值隐波/远月到期天/跨月差。">远月对比 (B)</th>
+          <th colspan="7" class="grp-aux" data-tooltip="近月A 衍生指标 + 操作信号: 平值隐波/隐波变化/实波/溢价/套利方向/辅助信号/推荐等级。">衍生与信号</th>
+        </tr>
+        <!-- 下行表头: 明细列名 -->
+        <tr class="header-detail">
+          <th data-sort="display_name" class="col-freeze">品种</th>
+          <th data-sort="pair_key" data-tooltip="多Delta配对标识。@CallΔ:PutΔ，如 @0.25:0.30。" class="col-freeze">配对</th>
+          <th data-sort="sector" data-tooltip="品种板块分类（农产品/工业品/化工/股指）。用于类型共振判断，静态取自 PRODUCT_MAP，不再动态漂移。" class="col-freeze">偏度类型</th>
+          <th data-sort="futures_code" data-tooltip="远月B（双月监控的远月合约）。" class="col-freeze">远月合约</th>
+          <th data-sort="near_month_code" data-tooltip="近月A（双月监控的近月合约）。主指标锚定近月。" class="col-freeze">近月合约</th>
+          <th data-sort="underlying_price" class="col-freeze">标的最新价</th>
+          <th data-sort="liquidity" data-tooltip="综合流动性评级 A/B/C/D。D级表示流动性过差，不参与信号触发。" class="col-freeze">流动性</th>
+          <!-- 近月基准(主指标=A) 列 -->
+          <th data-sort="iv_skew" data-tooltip="近月A配对IVs：购(Call)红 / 沽(Put)绿。25Δ认购IV − 25Δ认沽IV 合并展示。">配对IVs</th>
+          <th data-sort="iv_skew" data-tooltip="近月A：25Δ认购IV − 25Δ认沽IV。>0 表示 Call 相对 Put 贵（看涨预期），<0 表示 Put 相对 Call 贵（看跌预期）。">IV_Skew</th>
+          <th data-sort="z_score" data-tooltip="近月A：当前偏度相对自身历史均值的偏离（标准差倍数）。|Z|≥1.5 且 ready 时视为状态异常、可触发信号。优先取本地期权库真实25Δ偏度历史，否则回退系统累积。">Z值</th>
+          <th data-sort="iv_percentile" data-tooltip="近月A：当前平值IV在历史IV分布中的排名。优先本地库真实历史（·库），否则回退系统累积。>90%高位，<10%低位。">IV分位</th>
+          <th data-sort="skew_percentile" data-tooltip="近月A：当前25Δ偏度在历史偏度分布中的排名。优先本地库真实偏度（·库），否则回退系统累积。">偏度百分位</th>
+          <th data-sort="dte" data-tooltip="近月A：期权合约距离到期的剩余交易日。<10天临近到期，30–45天为最佳窗口，>60天为远月。">到期天</th>
+          <!-- 远月对比(B) 列 -->
+          <th data-sort="atm_iv_far" data-tooltip="远月B：平值IV。配对IVs列=购(Call红)/沽(Put绿)。">远月配对IVs</th>
+          <th data-sort="iv_skew_far" data-tooltip="远月B：25Δ认购IV − 25Δ认沽IV。远月配对不达标时显 —。">远月IV_Skew</th>
+          <th data-sort="skew_spread" data-tooltip="跨月差 = 近月A IV_Skew − 远月B IV_Skew。>0 红涨（近月比远月贵），<0 绿跌。">跨月差</th>
+          <th data-sort="z_score_far" data-tooltip="远月B：偏度Z值（含·库来源）。远月配对不达标时显 —。">远月Z</th>
+          <th data-sort="dte_far" data-tooltip="远月B：距离到期剩余交易日（永远显示，不受配对达标限制）。">远月到期天</th>
+          <th data-sort="atm_iv_far" data-tooltip="远月B：平值IV。">远月平值隐波</th>
+          <!-- 衍生与信号(近月A 衍生 + 操作信号) 列 -->
+          <th data-sort="atm_iv" data-tooltip="近月A：行权价最接近标价的期权隐含波动率（平值IV）。OpenVlab 口径。">平值隐波</th>
+          <th data-sort="iv_change" data-tooltip="近月A：平值隐波相对前一交易日的变化（百分点）。正=升波，负=降波。需至少2日系统历史才出值。">隐波变化</th>
+          <th data-sort="underlying_hv" data-tooltip="标的期货已实现波动率（HV），来自本地期权库 AKShare 日线计算，反映标的实际波动水平。">实波</th>
+          <th data-sort="premium" data-tooltip="近月A：平值隐波 − 实波（IV-HV 溢价）。正=期权相对历史波动偏贵，负=期权相对便宜。">溢价</th>
+          <th data-tooltip="基于 IV_Skew 符号的套利方向提示。long_skew=卖Call买Put（Call贵），short_skew=卖Put买Call（Put贵）。多Delta配对详情见侧滑面板。">套利方向</th>
+          <th data-tooltip="综合提示标签。类型共振=偏度方向与板块历史特征一致；相邻确认=相邻行权价IV跳变明显；尾部预警=远虚值与近虚值分化明显。">辅助信号</th>
+          <th data-sort="recommend" data-tooltip="★★★优先入场 / ★★☆可关注 / ★☆☆观望。综合偏度、Z值、IV分位、到期窗口与流动性判定。">推荐等级</th>
+        </tr>
+      </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+</div>
+
+<!-- ── 底部 ── -->
+<div class="footer-bar">
+  本工具数据仅供策略学习参考，不构成任何投资建议；期权交易属于高风险业务，所有交易盈亏由投资者自行承担。
+  数据基于 TqSdk 免费版，存在约 15 分钟延时。CZCE/DCE品种支持组合保证金，SHFE/INE部分支持。
+</div>
+
+<!-- ── 侧滑面板 Overlay ── -->
+<div class="overlay" id="overlay" onclick="closePanel()"></div>
+<div class="slide-panel" id="slidePanel">
+  <div class="panel-header">
+    <h3 id="panelTitle">品种深度分析</h3>
+    <button class="panel-close" onclick="closePanel()">✕</button>
+  </div>
+  <div class="panel-body" id="panelBody">
+    <div class="loading-overlay"><div class="loading-spinner"></div><span>加载中...</span></div>
+  </div>
+</div>
+
+<script>
+// ── 全局状态 ──
+let allProducts = [];
+let currentSort = { field: 'iv_skew', asc: false };
+let soundEnabled = true;
+let currentProduct = null;
+let currentDetail = null;
+let currentMonth = 'front';   // [双月] 侧滑面板选中的监控月: 'front'=近月A, 'main'=远月B
+let currentChartTab = 'pnl';  // [双月] 侧滑面板当前图表标签, 月切换后据此重渲染
+let chartInstances = {};
+
+// ── 策略阈值常量 ──
+const THRESHOLDS = {
+  ROW_HIGHLIGHT_SKEW: 8,       // 主表行红绿判定阈值
+  SELPAIR_DIST: 0.024,         // selPair匹配距离阈值
+  ENTRY_Z: 1.5,                // 开仓Z值阈值
+  ENTRY_SKEW: 6.0,             // 开仓偏度阈值
+  EXIT_SKEW: 2.0,              // 止盈偏度收敛阈值
+  EXIT_Z: 0.5,                 // 止盈Z回落阈值
+  STOP_Z: 2.5,                 // 止损Z值阈值
+  STOP_DTE: 5,                 // 止损DTE阈值
+  LIQ_INTRADAY_VOL: 50,        // 流动性盘中成交量
+  LIQ_HIST_VOL: 500,           // 流动性历史日均量
+  LIQ_OI_MIN: 50,
+  LIQ_NOTIONAL_WAN: 2000,                // 流动性持仓量
+  SIGMA_SKEW: 2.78,            // 偏度标准差
+  PNL_STEPS: 41,               // PnL图步数
+  PNL_RANGE: 0.15,             // PnL图价格范围
+  RF_RATE: 0.03,               // 无风险利率
+  STOP_LOSS_RATIO: 0.8,        // 止损比例
+  STOP_LOSS_MIN: -50           // 止损最小值
+};
+
+// [XSS防护] HTML转义函数, 所有后端字段拼入innerHTML前必须调用
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+// [浮点容差] 数组近似比较
+function approxEq(a, b, eps) { return Math.abs(a - b) < (eps || 1e-9); }
+
+// [公共函数] 从 multi_delta_skew 中按 pairKey 匹配最近的配对
+function findSelPair(d, pairKey) {
+  if (!pairKey) return null;
+  var mds = d.multi_delta_skew || [];
+  var parts = pairKey.split(':');
+  var cD = parseFloat(parts[0]);
+  var pD = -parseFloat(parts[1] || '0');
+  var bestDist = Infinity, result = null;
+  mds.forEach(function(x) {
+    var dist = Math.abs(x.call_delta - cD) + Math.abs(x.put_delta - pD);
+    if (dist < THRESHOLDS.SELPAIR_DIST && dist < bestDist) { result = x; bestDist = dist; }
+  });
+  return result;
+}
+
+// ── 初始化 ──
+document.addEventListener('DOMContentLoaded', () => {
+  updateClock();
+  setInterval(updateClock, 10000);
+  loadWatchlist();
+  fetchOverview();
+  setInterval(fetchOverview, 30000);  // 30秒轮询
+  syncHeaderTops();  // 测量分组表头实际高度, 赋给明细表头 sticky-top, 避免被分组行挡住
+  window.addEventListener('resize', syncHeaderTops);
+  // 安全兜底: 10秒后强制隐藏loading, 避免卡在加载中
+  setTimeout(() => {
+    const loader = document.getElementById('tableLoading');
+    if (loader && loader.style.display !== 'none') {
+      loader.innerHTML = '<span style="color:#E67E22;">数据正在后台刷新，约需5-10分钟<br>请稍等或点击右上角"立即刷新"</span>';
+    }
+  }, 10000);
+});
+
+// ── 表头高度同步: 让明细表头 sticky-top 准确落在分组表头下方 ──
+// 原因: 两行表头做 sticky 时, 分组行实际高度(line-height×font-size+padding+border)
+// 受字号/字体影响并不一定是写死的 33px, 写死会让明细行穿过分组行被"挡住"。
+// 解决: 渲染时测量 tr.header-group 高度, 写入 --group-header-h,
+//       同时显式给明细行所有 th 写 inline top(避免某些浏览器对 CSS 变量在 sticky 上的取值延迟)。
+// 改用 <th> sticky 后, 这里要给每个 th 写 top, 而不是给 tr。
+function syncHeaderTops() {
+  const gh = document.querySelector('tr.header-group');
+  const dh = document.querySelector('tr.header-detail');
+  if (!gh || !dh) return;
+  const h = gh.getBoundingClientRect().height;
+  // 写到 :root CSS 变量
+  document.documentElement.style.setProperty('--group-header-h', `${h}px`);
+  // 同时显式给所有明细 th 写 inline top
+  dh.querySelectorAll('th').forEach(th => {
+    th.style.top = `${h}px`;
+  });
+}
+
+function updateClock() {
+  document.getElementById('currentTime').textContent =
+    new Date().toLocaleString('zh-CN', { hour12: false });
+}
+
+// ── 数据获取 ──
+async function fetchOverview() {
+  try {
+    // [静态快照模式] 直接读取本地 data.json (由 export_dashboard.py 每日生成并推送)
+    const r = await fetch('data.json');
+    if (!r.ok) throw new Error('加载 data.json 失败: ' + r.status);
+    const data = await r.json();
+    META = data.meta || {};
+    detailsMap = data.details || {};
+    // 状态栏(快照模式)
+    updateStatusBar({
+      status: 'ready', connected: true,
+      last_refresh: META.last_refresh || META.generated_at,
+      total_products: (data.total != null ? data.total : (data.products||[]).length),
+      signal_count: data.signal_count || 0
+    });
+    updateSnapshotLabel();
+    allProducts = data.products || [];
+    if (!allProducts.length) {
+      document.getElementById('tableLoading').style.display = 'flex';
+      document.getElementById('tableLoading').innerHTML =
+        '<div class="loading-spinner"></div><span>数据刷新中, 暂无匹配品种...</span>';
+      document.getElementById('mainTable').style.display = 'none';
+      return;
+    }
+    populateFilterOptions();
+    applyFilters();
+    renderWatchlistBar();
+    updateSignalAlert(data.signal_count || 0);
+    document.getElementById('tableLoading').style.display = 'none';
+    document.getElementById('mainTable').style.display = '';
+    syncHeaderTops();  // 表显示后再次同步(初次 DOMContentLoaded 时表可能隐藏, 测不到高度)
+  } catch(e) {
+    console.error('获取数据失败:', e);
+    document.getElementById('tableLoading').innerHTML =
+      '<span style="color:#E74C3C;">数据加载失败，请确认后端已启动<br>' + e.message + '</span>';
+  }
+}
+
+// ── 状态栏更新 ──
+function updateStatusBar(data) {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  dot.className = 'dot';
+  if (data.connected || data.status === 'ready') {
+    dot.classList.add('green'); text.textContent = '就绪';
+  } else if (data.status === 'refreshing') {
+    dot.classList.add('yellow'); text.textContent = data.status_message || '刷新中...';
+  } else if (data.status === 'initializing') {
+    // 初始化阶段不显示任何提示文字, 避免首屏出现"初始化中..."
+    dot.classList.add('yellow'); text.textContent = '';
+  } else {
+    dot.classList.add('red'); text.textContent = data.status_message || '异常';
+  }
+  if (data.last_refresh) {
+    const dt = new Date(data.last_refresh);
+    document.getElementById('lastRefresh').textContent =
+      dt.toLocaleTimeString('zh-CN', { hour12: false });
+  }
+  document.getElementById('totalProducts').textContent = data.total_products || allProducts.length;
+  document.getElementById('signalCount').textContent = data.signal_count || 0;
+  document.getElementById('signalCount').className =
+    'signal-count' + ((data.signal_count || 0) > 0 ? ' active' : '');
+}
+
+function updateSnapshotLabel() {
+  const el = document.getElementById('snapshotTime');
+  if (!el) return;
+  if (META && META.generated_at) {
+    try { el.textContent = new Date(META.generated_at).toLocaleString('zh-CN', {hour12:false}); }
+    catch(e) { el.textContent = META.generated_at; }
+  } else { el.textContent = '—'; }
+}
+function updateSignalAlert(count) {
+  const prevCount = parseInt(document.getElementById('signalCount').dataset.prevCount || '0');
+  if (count > 0 && soundEnabled) {
+    document.getElementById('signalCount').classList.add('active');
+    // 信号新增时播放提示音
+    if (count > prevCount) playBeep();
+  } else {
+    document.getElementById('signalCount').classList.remove('active');
+  }
+  document.getElementById('signalCount').dataset.prevCount = count;
+}
+
+// Web Audio API 提示音（无需外部音频文件）
+let audioCtx = null;
+function playBeep() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.3;
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+    // 第二声
+    setTimeout(() => {
+      const osc2 = audioCtx.createOscillator();
+      const gain2 = audioCtx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(audioCtx.destination);
+      osc2.type = 'sine';
+      osc2.frequency.value = 1100;
+      gain2.gain.value = 0.3;
+      osc2.start();
+      osc2.stop(audioCtx.currentTime + 0.2);
+    }, 200);
+  } catch(e) { /* 浏览器不支持Web Audio，静默忽略 */ }
+}
+
+// ── 筛选选项 ──
+function populateFilterOptions() {
+  const sel = document.getElementById('filterProduct');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">全部</option>';
+  const names = [...new Set(allProducts.map(p => p.product))].sort();
+  names.forEach(n => {
+    const p = allProducts.find(x => x.product === n);
+    sel.innerHTML += `<option value="${esc(n)}">${esc(p.display_name||n)} (${esc(n)})</option>`;
+  });
+  sel.value = current;
+}
+
+// ── 筛选与渲染 ──
+let filteredProducts = [];
+
+function applyFilters() {
+  const fp = document.getElementById('filterProduct').value;
+  const fe = document.getElementById('filterExchange').value;
+  const fs = document.getElementById('filterSector').value;
+  const fl = document.getElementById('filterLiquidity').value;
+  const sm = parseFloat(document.getElementById('filterSkewMin').value);
+  const zm = parseFloat(document.getElementById('filterZMin').value);
+
+  document.getElementById('skewMinVal').textContent = sm + '%';
+  document.getElementById('zMinVal').textContent = zm;
+
+  filteredProducts = allProducts.filter(p => {
+    if (p.status !== 'ready') return false;
+    if (fp && p.product !== fp) return false;
+    if (fe && p.exchange !== fe) return false;
+    if (fs && (p.sector || '') !== fs && (p.classification || '') !== fs) return false;
+    if (fl) {
+      const allowed = fl.split('|');
+      if (!allowed.includes(p.liquidity)) return false;
+    }
+    if (Math.abs(p.iv_skew || 0) < sm) return false;
+    if (Math.abs(p.z_score || 0) < zm) return false;
+    return true;
+  });
+
+  // 排序
+  const sf = currentSort.field;
+  filteredProducts.sort((a, b) => {
+    let va = a[sf], vb = b[sf];
+    if (sf === 'iv_skew' || sf === 'z_score') {
+      va = Math.abs(va || 0); vb = Math.abs(vb || 0);
+    }
+    if (typeof va === 'string') va = va.toLowerCase();
+    if (typeof vb === 'string') vb = vb.toLowerCase();
+    if (va < vb) return currentSort.asc ? -1 : 1;
+    if (va > vb) return currentSort.asc ? 1 : -1;
+    return 0;
+  });
+
+  renderTable();
+}
+
+function resetFilters() {
+  document.getElementById('filterProduct').value = '';
+  document.getElementById('filterExchange').value = '';
+  document.getElementById('filterSector').value = '';
+  document.getElementById('filterLiquidity').value = '';
+  document.getElementById('filterSkewMin').value = 0;
+  document.getElementById('filterZMin').value = 0;
+  document.getElementById('skewMinVal').textContent = '0%';
+  document.getElementById('zMinVal').textContent = '0';
+  applyFilters();
+}
+
+function sortTable(field) {
+  if (currentSort.field === field) {
+    currentSort.asc = !currentSort.asc;
+  } else {
+    currentSort.field = field;
+    currentSort.asc = field === 'iv_skew' || field === 'z_score' ? false : true;
+  }
+  applyFilters();
+}
+
+// ── 表格渲染 ──
+function renderTable() {
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '';
+
+  // 展开: 每个品种的 multi_delta_skew → 多行
+  const allRows = [];
+  filteredProducts.forEach(p => {
+    const mds = p.multi_delta_skew || [];
+    if (mds.length === 0) {
+      allRows.push({product: p, pair: null, isBase: true});
+    } else {
+      // 25Δ基准配对 = 与产品 call_iv_25d/put_iv_25d 最接近的那条 mds。
+      // 注意: 25Δ 基准的 delta 未必恰好 0.25/0.25(call/put 取最接近 0.25 的档),
+      // 故按 IV 匹配而非按 delta。取 IV 距离最小者作为基准行(至多 1 条)。
+      const bc = p.call_iv_25d, bp = p.put_iv_25d;
+      let bestD = null, bestDist = 1e9;
+      if (bc != null && bp != null) {
+        mds.forEach(d => {
+          const dist = Math.abs(d.call_iv - bc) + Math.abs(d.put_iv - bp);
+          if (dist < bestDist) { bestDist = dist; bestD = d; }
+        });
+      }
+      const baseMatch = bestD && bestDist < 0.3;
+      mds.forEach(d => {
+        allRows.push({product: p, pair: d, isBase: !!baseMatch && d === bestD});
+      });
+    }
+  });
+
+  if (allRows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="26" style="text-align:center;padding:20px;color:#BDC3C7;">无匹配结果</td></tr>';
+    return;
+  }
+
+  const htmlParts = [];
+  allRows.forEach(row => {
+    const p = row.product, d = row.pair, isBase = row.isBase;
+    const skew = p.iv_skew || 0;
+    const absSkew = Math.abs(skew);
+    const z = p.z_score || 0;
+    const absZ = Math.abs(z);
+
+    const ivPct = p.local_iv_percentile != null ? p.local_iv_percentile : (p.iv_percentile || 50);
+    const ivPctSrc = p.local_iv_percentile != null ? '<span class="val-gray">·库</span>' : '';
+    const skPct = p.skew_percentile != null ? p.skew_percentile : 50;
+    const skPctSrc = (p.skew_pct_source === '本地库真实偏度') ? '<span class="val-gray">·库</span>' : '';
+
+    const effLiq = (x) => x.option_liq_grade || x.liquidity || '?';
+    let rowClass = isBase ? 'row-active row-base' : (d ? 'row-active row-pair' : 'row-active row-base');
+    if (effLiq(p) === 'D') rowClass = d ? 'row-pair' : 'row-gray';
+    if (p.status !== 'ready') rowClass = d ? 'row-pair' : 'row-gray';
+
+    const cls = p.classification || p.sector || '';
+    const clsLabel = {agri:'农产品型',indust:'工业品型',chem:'化工品型',index:'股指型'}[cls] || cls;
+
+    let dteTag = '';
+    if (p.dte_label === '最佳窗口') dteTag = `<span class="tag tag-green">${p.dte}d</span>`;
+    else if (p.dte_label === '临近到期') dteTag = `<span class="tag tag-red">${p.dte}d</span>`;
+    else if (p.dte_label === '远月合约') dteTag = `<span class="tag tag-gray">${p.dte}d</span>`;
+    else dteTag = `${p.dte || '?'}d`;
+
+    let dirHtml = '';
+    if (p.direction === 'short_skew') dirHtml = '<span class="val-red">🔴卖Put买Call</span>';
+    else if (p.direction === 'long_skew') dirHtml = '<span class="val-green">🟢卖Call买Put</span>';
+    else dirHtml = '<span class="val-gray">—</span>';
+
+    let auxHtml = '';
+    if (p.aux_signals && p.aux_signals.length > 0) {
+      auxHtml = p.aux_signals.map(s => `<span class="tag tag-blue">${esc(s)}</span>`).join(' ');
+    }
+
+    let recHtml = `<span class="tag-recommend">${p.recommend||'★☆☆'}</span>`;
+
+    const liqColors = {A:'tag-green',B:'',C:'tag-yellow',D:'tag-red'};
+    const liqVal2 = effLiq(p);
+    const liqSrc2 = p.option_liq_grade ? '<span class="val-gray">·库</span>' : '';
+    const liqTag = `<span class="tag ${liqColors[liqVal2]||''}">${liqVal2}${liqSrc2}</span>`;
+
+    let zHtml = '';
+    const zSrc = (p.z_source === '本地库真实偏度') ? '<span class="val-gray">·库</span>' : '';
+    if (p.z_status === 'ready') {
+      zHtml = `<span class="${absZ >= 1.5 ? 'val-bold' : ''}">${z.toFixed(2)}${zSrc}</span>`;
+    } else {
+      zHtml = `<span class="val-gray" title="${p.z_status}">${p.z_status||'N/A'}</span>`;
+    }
+
+    // 配对: 该行如果是某个配对, 用配对的数据; 否则用品种的 25Δ 基准
+    const pairDisplay = d ? ('@' + d.call_delta.toFixed(2) + ':' + Math.abs(d.put_delta).toFixed(2)) : '—';
+    const callIVStr = d ? d.call_iv.toFixed(1) + '%' : (p.call_iv_25d || 0).toFixed(1) + '%';
+    const putIVStr  = d ? d.put_iv.toFixed(1) + '%'  : (p.put_iv_25d || 0).toFixed(1) + '%';
+    const skewStr   = d ? (d.skew > 0 ? '+' : '') + d.skew.toFixed(2) + '%' : (skew > 0 ? '+' : '') + skew.toFixed(2) + '%';
+    const skewClr   = d ? (d.skew > 0 ? 'val-red' : 'val-green') : (skew > 0 ? 'val-red' : 'val-green');
+
+    // 远月对比字段 (远月配对不达标时后端置 None → 显 —)
+    // 优先用配对专属的 far_* 字段(按 call_delta/put_delta 在远月链查 IV),
+    // 这样多 Delta 配对展开后远月 IV_Skew/远月配对 IVs 各不相同;
+    // fallback 到 product 级 25Δ 值(d=null 即主行, 或配对项无 far_* 字段)。
+    const fSkew = (d && d.far_skew != null) ? d.far_skew : p.iv_skew_far;
+    const fCall = (d && d.far_call_iv != null) ? d.far_call_iv : p.call_iv_25d_far;
+    const fPut  = (d && d.far_put_iv  != null) ? d.far_put_iv  : p.put_iv_25d_far;
+    const fZ = p.z_score_far, fZStatus = p.z_status_far;
+    const fZSrc = (p.z_source_far === '本地库真实偏度') ? '<span class="val-gray">·库</span>' : '';
+    const fAtm = p.atm_iv_far, fDte = p.dte_far, spread = p.skew_spread;
+    const farSkewHtml = fSkew != null
+      ? `<span class="skew-bright ${fSkew>0?'val-red':'val-green'}">${(fSkew>0?'+':'')+fSkew.toFixed(2)}</span>` : '<span class="val-gray">—</span>';
+    const farZHtml = fSkew != null
+      ? (fZStatus === 'ready' ? `<span class="${Math.abs(fZ)>=1.5?'val-bold':''}">${fZ.toFixed(2)}${fZSrc}</span>` : `<span class="val-gray" title="${fZStatus||''}">${fZStatus||'N/A'}</span>`)
+      : '<span class="val-gray">—</span>';
+    const farPairHtml = (fCall != null && fPut != null)
+      ? `<span class="val-red">${(fCall||0).toFixed(1)}%</span> / <span class="val-green">${(fPut||0).toFixed(1)}%</span>` : '<span class="val-gray">—</span>';
+    const farAtmHtml = fAtm != null ? `${(fAtm).toFixed(1)}%` : '<span class="val-gray">—</span>';
+    const farDteHtml = fDte != null ? `${fDte}d` : '<span class="val-gray">—</span>';
+    // 跨月差: 优先用配对级 d.spread (按各自Delta算的近月−远月), fallback 到 product 级 p.skew_spread
+    const pairSpread = (d && d.spread != null) ? d.spread : null;
+    const spreadVal = pairSpread != null ? pairSpread : spread;
+    const spreadHtml = spreadVal != null
+      ? `<span class="${spreadVal>0?'val-red':'val-green'}">${(spreadVal>0?'+':'')+spreadVal.toFixed(2)}</span>` : '<span class="val-gray">—</span>';
+
+    htmlParts.push(`
+      <tr class="${rowClass}" onclick="openPanel('${p.product}', '${d?d.call_delta.toFixed(2)+':'+Math.abs(d.put_delta).toFixed(2):''}')">
+        <td class="col-freeze"><strong>${esc(p.display_name||p.product)}</strong> <span class="val-gray">${esc(p.product)}</span></td>
+        <td class="val-gray col-freeze">${pairDisplay}</td>
+        <td class="col-freeze"><span class="tag">${esc(clsLabel)}</span></td>
+        <td class="col-freeze">${esc(p.futures_code||'')}</td>
+        <td class="col-freeze">${esc(p.near_month_code||'')}</td>
+        <td class="val-bold col-freeze">${(p.underlying_price||0)<1000?(p.underlying_price||0).toFixed(2):(p.underlying_price||0).toFixed(0)}</td>
+        <td class="col-freeze">${liqTag}</td>
+        <!-- 近月基准(主指标=A) -->
+        <td><span class="val-red">${callIVStr}</span> / <span class="val-green">${putIVStr}</span></td>
+        <td class="val-bold skew-bright ${skewClr}">${skewStr}</td>
+        <td>${zHtml}</td>
+        <td>${ivPct}%${ivPctSrc}</td>
+        <td class="${skPct>=80||skPct<=20?'val-bold':''}">${skPct}%${skPctSrc}</td>
+        <td>${dteTag}</td>
+        <!-- 远月对比(B) - 新顺序: 配对IVs → IV_Skew → 跨月差 → Z → 到期天 → 平值隐波 -->
+        <td>${farPairHtml}</td>
+        <td>${farSkewHtml}</td>
+        <td>${spreadHtml}</td>
+        <td>${farZHtml}</td>
+        <td>${farDteHtml}</td>
+        <td>${farAtmHtml}</td>
+        <!-- 衍生与信号(近月A 衍生 + 操作信号) -->
+        <td class="val-bold">${(p.atm_iv||0).toFixed(1)}%</td>
+        <td class="${(p.iv_change||0)>0?'val-red':((p.iv_change||0)<0?'val-green':'')}">${p.iv_change!=null?(p.iv_change>0?'+':'')+p.iv_change.toFixed(2):'—'}</td>
+        <td>${(p.underlying_hv!=null?p.underlying_hv.toFixed(1)+'%':'—')}</td>
+        <td class="${(p.premium||0)>0?'val-red':((p.premium||0)<0?'val-green':'')}">${p.premium!=null?(p.premium>0?'+':'')+p.premium.toFixed(2):'—'}</td>
+        <td>${dirHtml}</td>
+        <td>${auxHtml}</td>
+        <td>${recHtml}</td>
+      </tr>`);
+  });
+  tbody.innerHTML = htmlParts.join('');
+}
+
+// ── 表头排序 ──
+document.addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (th) sortTable(th.dataset.sort);
+});
+
+// ── 侧滑面板 ──
+let currentPairKey = '';
+let detailsMap = {};
+let META = {};  // 当前选中的配对 (如 "0.25:0.30")，为空则显示品种级
+async function openPanel(product, pairKey) {
+  currentProduct = product;
+  currentPairKey = pairKey || '';
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('slidePanel').classList.add('open');
+  document.getElementById('panelBody').innerHTML =
+    '<div class="loading-overlay"><div class="loading-spinner"></div><span>加载中...</span></div>';
+
+  try {
+    const detail = detailsMap[product];
+    if (!detail) throw new Error('暂无该品种快照详情（可能本期未纳入）');
+    currentDetail = detail;
+    renderDetailPanel(currentDetail);
+  } catch(e) {
+    document.getElementById('panelBody').innerHTML =
+      `<div style="padding:20px;color:#E74C3C;">
+         <p style="font-weight:600;margin:0 0 8px 0;">加载失败</p>
+         <p style="margin:0 0 8px 0;font-size:13px;">${product}：${e.message}</p>
+         <p style="margin:0;font-size:12px;color:#888;">该品种可能本期数据未就绪，请稍后重试或刷新页面。</p>
+       </div>`;
+  }
+}
+
+function closePanel() {
+  document.getElementById('overlay').classList.remove('open');
+  document.getElementById('slidePanel').classList.remove('open');
+  Object.values(chartInstances).forEach(c => c.dispose());
+  chartInstances = {};
+}
+
+// [双月] 取选中监控月的 skew_data 与 option_chain。
+// 近月A(front): 用 detail.skew_data(主指标) + option_chain_front。
+// 远月B(main): 用 detail.skew_data 的 *_far 字段合成虚拟 skew_data + option_chain_main。
+// 产品级字段(HV/本地库IV等)两月共用, 仅月级字段(偏度/Z/平值隐波/到期天/流动性/方向)切换。
+function getActiveDetail(detail) {
+  const base = (detail && detail.skew_data) || {};
+  if (currentMonth === 'main') {
+    const far = Object.assign({}, base);
+    far.iv_skew = base.iv_skew_far;
+    far.z_score = base.z_score_far;
+    far.z_status = base.z_status_far;
+    far.z_source = base.z_source_far;
+    far.call_iv_25d = base.call_iv_25d_far;
+    far.put_iv_25d = base.put_iv_25d_far;
+    far.atm_iv = base.atm_iv_far;
+    far.iv_percentile = base.iv_percentile_far;
+    far.skew_percentile = base.skew_percentile_far;
+    far.dte = base.dte_far;
+    far.dte_label = base.dte_label_far;
+    far.dte_color = base.dte_color_far;
+    far.liquidity = base.liquidity_far;
+    far.direction = base.direction_far;
+    const chain = (detail && detail.option_chain_main) || (detail && detail.option_chain) || {};
+    return { d: far, chain: chain };
+  }
+  const chain = (detail && detail.option_chain_front) || (detail && detail.option_chain) || {};
+  return { d: base, chain: chain };
+}
+
+function switchMonth(m) {
+  currentMonth = (m === 'main') ? 'main' : 'front';
+  if (currentDetail) renderDetailPanel(currentDetail);
+}
+
+function renderDetailPanel(detail) {
+  // [双月] 按选中监控月(近月A/far月B)取对应 skew_data 与 option_chain
+  const _act = getActiveDetail(detail);
+  const d = _act.d;
+  const chain = _act.chain;
+  const hist = detail.history || [];
+  const cls = detail.classification || d.sector || '';
+  const clsLabel = {agri:'农产品型',indust:'工业品型',chem:'化工品型',index:'股指型'}[cls] || cls;
+  // 本地库真实量能优先 (option_greeks_daily); 近月基准合约OI可能偏低, 仅作补充
+  const legVol = (x) => (x.local_volume!=null && x.local_volume>0) ? x.local_volume : (x.volume||0);
+  const legOi = (x) => (x.local_oi!=null) ? ` (OI ${x.local_oi})` : '';
+  const legLiq = (x) => x.local_liq_grade || x.liquidity || '';
+
+  const skew = d.iv_skew || 0;
+  const z = d.z_score || 0;
+  const absSkew = Math.abs(skew);
+  const absZ = Math.abs(z);
+
+  // 选中配对: 如果从主表配对行点击进来的, 取该配对的 IV / Skew
+  let selPair = findSelPair(d, currentPairKey);
+  // 选中配对后, 偏度/IV 用配对数据; 否则用品种 25Δ 基准
+  const effSkew = selPair ? selPair.skew : skew;
+  const effCallIV = selPair ? selPair.call_iv : (d.call_iv_25d || 0);
+  const effPutIV  = selPair ? selPair.put_iv : (d.put_iv_25d || 0);
+
+  let html = '';
+
+  // ── 近月/远月 切换 (双月监控) ──
+  const _base = detail.skew_data || {};
+  html += '<div class="month-switch" style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap;">';
+  html += '<span class="val-gray" style="font-size:12px;">监控月:</span>';
+  html += `<button class="lot-btn${currentMonth==='front'?' active':''}" onclick="switchMonth('front')">近月A · ${esc(_base.near_month_code||'—')}</button>`;
+  html += `<button class="lot-btn${currentMonth==='main'?' active':''}" onclick="switchMonth('main')">远月B · ${esc(_base.futures_code||'—')}</button>`;
+  html += `<span class="val-gray" style="font-size:12px;">(${currentMonth==='main'?'远月B为主指标对比月':'近月A为主指标锚定月'})</span>`;
+  html += '</div>';
+
+  // ── 指标卡 ──
+  html += '<div class="metric-cards">';
+  html += cardHTML('IV_Skew', `${effSkew>0?'+':''}${effSkew.toFixed(2)}%`,
+    `${d.iv_skew_mean != null ? '均值 '+d.iv_skew_mean.toFixed(2)+'% · σ '+d.iv_skew_std.toFixed(2)+'%' : '均值积累中'}${selPair?' · 配对 '+currentPairKey:''}`, Math.abs(effSkew) >= THRESHOLDS.ROW_HIGHLIGHT_SKEW ? (effSkew > 0 ? 'blink-red' : 'blink-green') : '',
+    effSkew > 0 ? 'val-red' : 'val-green');
+  // Z值: 基于25Δ偏度历史, 选中非25Δ配对时标注基准
+  var zSub = d.z_status === 'ready' ? `σ: ${(hist.length>0?calcStd(hist):0).toFixed(2)}` : '';
+  if (selPair) zSub += (zSub ? ' · ' : '') + '25Δ基准';
+  html += cardHTML('Z值', z ? z.toFixed(2) : (d.z_status||'N/A'),
+    zSub, absZ >= 1.5 ? 'blink-red' : '');
+  // IV分位: 优先本地期权库真实IV历史分位, 否则系统自身累积(原油等系统历史不足时恒50)
+  const ivPctDetail = d.local_iv_percentile != null ? d.local_iv_percentile : (d.iv_percentile || 50);
+  const ivPctDetailSrc = d.local_iv_percentile != null ? '本地库真实历史' : '系统累积中';
+  html += cardHTML('IV分位', `${ivPctDetail}%`,
+    ivPctDetailSrc, (ivPctDetail >= 90 || ivPctDetail <= 10) ? 'blink-red' : '');
+  // 偏度百分位 (优先本地库真实偏度历史[方案A], 否则系统累积), 选中非25Δ配对时标注基准
+  const skewSrc = d.skew_pct_source === '本地库真实偏度' ? '本地库真实偏度历史' : '系统累积中';
+  var skewPctSub = skewSrc + (selPair ? ' · 25Δ基准' : '');
+  html += cardHTML('偏度百分位', `${d.skew_percentile!=null?d.skew_percentile:50}%`,
+    skewPctSub, (d.skew_percentile!=null && (d.skew_percentile>=80 || d.skew_percentile<=20)) ? 'blink-red' : '');
+  // 本地期权数据库真实HV基线 (白总库, AKShare期货日线, 不参与偏度信号)
+  const hvPct = d.underlying_hv_percentile;
+  const hvMt = (d.underlying_hv_5d!=null||d.underlying_hv_20d!=null||d.underlying_hv_60d!=null)
+    ? `5d ${d.underlying_hv_5d!=null?d.underlying_hv_5d:'-'} · 20d ${d.underlying_hv_20d!=null?d.underlying_hv_20d:'-'} · 60d ${d.underlying_hv_60d!=null?d.underlying_hv_60d:'-'}`
+    : (hvPct!=null ? `近一年分位 ${hvPct}%` : '本地库无覆盖');
+  html += cardHTML('标的HV·本地库', d.underlying_hv!=null ? `${d.underlying_hv.toFixed(1)}%` : '—',
+    hvMt,
+    (hvPct!=null && (hvPct>=80 || hvPct<=20)) ? 'blink-red' : '', '');
+  // 本地期权数据库真实IV历史 (白总库, SHFE/CZCE/GFEX交易所, 仅参考/交叉校验)
+  const ivPct = d.local_iv_percentile;
+  const sysIv = (d.call_iv_25d!=null && d.put_iv_25d!=null) ? ((d.call_iv_25d + d.put_iv_25d) / 2).toFixed(1) : null;
+  const ivSub = sysIv!=null
+    ? `系统实时${sysIv}% · 本地库分位${ivPct!=null?ivPct+'%':'—'}`
+    : (ivPct!=null ? `本地库历史分位 ${ivPct}%` : (d.local_iv!=null ? '本地样本<5天' : '本地库无覆盖'));
+  html += cardHTML('历史IV·本地库', d.local_iv!=null ? `${d.local_iv.toFixed(1)}%` : '—',
+    ivSub,
+    (ivPct!=null && (ivPct>=80 || ivPct<=20)) ? 'blink-red' : '', '');
+  // 标的价格区间 (实时TqSdk累积, 真实数据)
+  const uphArr = (detail.underlying_price_history && detail.underlying_price_history[d.product]) || [];
+  let upVal = d.underlying_price!=null ? d.underlying_price.toFixed(1) : '—';
+  let upSub = '实时累积中...';
+  if (uphArr.length >= 2) {
+    const ps = uphArr.map(x => x[1]);
+    const mn = Math.min(...ps), mx = Math.max(...ps), avg = ps.reduce((a,b)=>a+b,0)/ps.length;
+    upSub = `区间[${mn.toFixed(0)}, ${mx.toFixed(0)}] 均值${avg.toFixed(0)} · ${uphArr.length}点`;
+  } else if (uphArr.length === 1) {
+    upSub = '首点 · 累积中';
+  }
+  html += cardHTML('标的价格区间', upVal, upSub, '', '');
+  // Skew比率: 选中配对时用配对IV计算, 否则用品种25Δ基准
+  if (selPair) {
+    var effAvgIV = (effCallIV + effPutIV) / 2;
+    var effRatio = effAvgIV > 0 ? (effSkew / effAvgIV * 100) : 0;
+    html += cardHTML('Skew比率', `${effRatio.toFixed(1)}%`, '偏度/平均IV · 配对', '', '');
+  } else {
+    html += cardHTML('Skew比率', `${(d.skew_ratio||0).toFixed(1)}%`, '偏度/平均IV', '', '');
+  }
+  html += cardHTML('到期天数', `${d.dte||'?'}天`,
+    d.dte_label||'', d.dte < 10 ? 'blink-red' : '',
+    d.dte_color === 'green' ? 'val-green' : d.dte_color === 'red' ? 'val-red' : '');
+  html += cardHTML('组合净Δ', '—', '需选取具体行权价', '', '');
+  html += cardHTML('偏度类型', clsLabel, d.signal ? '异常' : '正常', '', '');
+  // 期权流动性 (本地库真实总持仓评级, option_greeks_daily; 仅本地库有量能时显示)
+  if (d.option_liq_grade) {
+    const oiW = d.option_oi_total!=null ? (d.option_oi_total/10000).toFixed(1)+'万手' : '—';
+    const volW = d.option_volume_total!=null ? (d.option_volume_total/10000).toFixed(1)+'万手' : '—';
+    html += cardHTML('期权流动性·本地库', `${d.option_liq_grade}级`,
+      `总持仓 ${oiW} · 日量 ${volW} · ${esc(d.option_liq_date||'')}`,
+      d.option_liq_grade==='D' ? 'blink-red' : '', '');
+  }
+  html += '</div>';
+
+  // ── 期权链 + 图表 ──
+  html += '<div class="chain-chart-row">';
+  html += renderOptionChain(chain, d, clsLabel, selPair);
+  html += '<div class="chart-area">';
+  html += '<div class="chart-tabs">';
+  var chartHelp = {
+    'pnl': '策略盈亏图 · 横轴=标的价格 · 纵轴=到期盈亏(元) · 绿区=盈利 · 红区=亏损 · 蓝色虚线=当前价 · 灰色虚线=盈亏平衡',
+    'smile': '波动率微笑 · X轴=行权价 · Y轴=隐波IV% · 紫线=今日 · 灰虚线=昨日(估) · 红/绿柱子=看涨/看跌持仓 · 曲线越低越便宜',
+    'skewterm': '偏度期限结构 · X轴=虚值档位(OTM1~OTM5,Δ≈20~0) · 左Y=Call/Put IV · 右Y=偏度% · 偏度>0看涨预期 · <0看跌预期',
+    'hvenv': 'HV分位 · X轴=日期 · Y轴=HV% · 红虚线=+2σ · 绿虚线=-2σ · 通道外为异常 · 分位数显示当前HV在历史位置',
+    'localiv': 'IV分位 · X轴=日期 · Y轴=平值隐波IV%(本地库真实) · 红虚线=+2σ · 绿虚线=-2σ · 紫点=当前值+分位 · 高于均值=隐含偏高',
+    'zscore': 'Z值走势 · X轴=日期 · Y轴=偏度标准化Z值 · 黄虚线=±1.5阈值 · 红虚线=±2.0异常 · |Z|>2表示偏度极端=交易信号'
+  };
+  [['pnl','策略盈亏图','盈利/亏损分析'],
+  ['smile','波动率微笑','IV与持仓对比'],
+  ['skewterm','偏度期限结构','各档偏度变化'],
+  ['hvenv','HV分位','标的真实波动率HV历史'],
+  ['localiv','IV分位','平值期权隐含波动率IV历史'],
+  ['zscore','Z值走势','标准化偏度']].forEach(([tab,name,sub], i) => {
+    html += '<button class="chart-tab' + (i===0?' active':'') + '" onclick="switchChartTab(\'' + tab + '\')">' + name + '</button>';
+    html += '<button class="chart-help" onclick="event.stopPropagation();showChartHelp(\'' + tab + '\')" title="' + chartHelp[tab] + '">?</button>';
+  });
+  html += '</div>';
+  html += '<div id="lotSelector" class="lot-selector">';
+  [1,2,5,10].forEach(n => {
+    html += `<button class="lot-btn${n===1?' active':''}" onclick="switchLots(${n})">${n}x</button>`;
+  });
+  html += '</div>';
+  // 策略选择器
+  html += '<div class="strategy-selector" id="strategySelector" style="display:flex;gap:4px;margin-bottom:4px;">';
+  html += '<button class="strat-btn active" onclick="switchStrategy(\'RR\')" title="风险逆转: 卖贵+买便宜, 1:1等权重, 赌偏度回归">RR</button>';
+  html += '<button class="strat-btn" onclick="switchStrategy(\'DDH\')" title="Delta对冲逆转: RR+期货对冲, 纯Vega">DDH</button>';
+  html += '<button class="strat-btn" onclick="switchStrategy(\'Ratio\')" title="比率价差: 买便宜侧2手+卖贵侧1手, 加倍下注">Ratio</button>';
+  html += '</div>';  // close strategy-selector
+  html += '<div class="chart-container" id="chartPnl"></div>';
+  html += '<div class="chart-container" id="chartSmile" style="display:none;"></div>';
+  html += '<div class="chart-container" id="chartSkewTerm" style="display:none;"></div>';
+  html += '<div class="chart-container" id="chartHvEnv" style="display:none;"></div>';
+  html += '<div class="chart-container" id="chartLocalIv" style="display:none;"></div>';
+  html += '<div class="chart-container" id="chartZScore" style="display:none;"></div>';
+  html += '</div></div>';
+
+  // ── 策略详情 (组合方向根据 strategy + direction 动态渲染) ──
+  const callDir = (d.direction === 'short_skew') ? { text: '买入', cls: 'val-green' }
+               : (d.direction === 'long_skew')  ? { text: '卖出', cls: 'val-red' }
+               : { text: '—', cls: 'val-gray' };
+  const putDir  = (d.direction === 'short_skew') ? { text: '卖出', cls: 'val-red' }
+               : (d.direction === 'long_skew')  ? { text: '买入', cls: 'val-green' }
+               : { text: '—', cls: 'val-gray' };
+  html += '<div class="detail-section"><h4>组合合约明细</h4>';
+  html += '<table class="detail-table"><thead><tr><th>合约代码</th><th>方向</th><th>手数</th><th>IV</th><th>Delta</th><th>成交量</th><th>流动性</th></tr></thead><tbody>';
+  // 选中配对: 取该配对的合约, 否则用 25Δ 基准
+  let callLeg = chain.benchmark_call, putLeg = chain.benchmark_put;
+  if (selPair && chain.calls && chain.puts) {
+    const cSym = selPair.call_symbol, pSym = selPair.put_symbol;
+    if (cSym) callLeg = chain.calls.find(x => x.symbol === cSym) || callLeg;
+    if (pSym) putLeg  = chain.puts.find(x => x.symbol === pSym)  || putLeg;
+  }
+  const isLongSkew = (d.iv_skew || 0) < 0;  // 方向跟随品种级25Δ基准, 与callDir/putDir一致
+  const callDelta = (callLeg && callLeg.delta) ? callLeg.delta : 0.5;
+  const putDelta = (putLeg && putLeg.delta) ? putLeg.delta : -0.5;
+  const curStrat = currentStrategy || 'RR';
+  // 策略模板: [合约代码, 方向, 手数倍数, class]
+  const legs = [];
+  if (curStrat === 'RR' || curStrat === 'DDH') {
+    legs.push([callLeg, callDir, 1]);
+    legs.push([putLeg, putDir, 1]);
+  } else if (curStrat === 'Ratio') {
+    // 比率价差: 卖贵侧1手 + 买便宜侧2手(赌偏度回归)
+    // isLongSkew(Put贵): 卖Put×2 + 买Call×1; 否则(Call贵): 卖Call×1 + 买Put×2
+    if (isLongSkew) {
+      legs.push([callLeg, {text:'买入', cls:'val-green'}, 1]);
+      legs.push([putLeg, {text:'卖出', cls:'val-red'}, 2]);
+    } else {
+      legs.push([callLeg, {text:'卖出', cls:'val-red'}, 1]);
+      legs.push([putLeg, {text:'买入', cls:'val-green'}, 2]);
+    }
+  }
+  // DDH加期货对冲腿
+  if (curStrat === 'DDH' && d.futures_code) {
+    const netD = isLongSkew ? (callDelta - putDelta) : (putDelta - callDelta);
+    const hedgeD = -netD;  // 反向对冲
+    const hedgeDirText = hedgeD > 0 ? '买入' : '卖出';
+    const hedgeCls = hedgeD > 0 ? 'val-green' : 'val-red';
+    const hedgeLot = Math.abs(netD).toFixed(2);
+    legs.push([{ symbol: d.futures_code + ' (期货对冲)', delta: 0, iv: 0, volume: 0, local_volume: 0, liquidity: '-' }, {text: hedgeDirText, cls: hedgeCls}, hedgeLot]);
+  }
+  legs.forEach(([c, dir, mult]) => {
+    if (!c) return;
+    html += '<tr><td>' + esc(c.symbol||'') + '</td><td class="' + dir.cls + '">' + dir.text + '</td><td>' + mult + '</td><td>' + ((c.iv||0).toFixed(1)) + '%</td><td>' + ((c.delta||0).toFixed(4)) + '</td><td>' + legVol(c) + legOi(c) + '</td><td>' + esc(legLiq(c)) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+
+  // ── 策略风控 ──
+  html += '<div class="detail-section"><h4>策略风控</h4>';
+  html += '<table class="detail-table"><thead><tr><th>规则</th><th>条件</th><th>当前</th></tr></thead><tbody>';
+  const zCur = d.z_score || 0;
+  const z0 = Math.abs(zCur);
+  const skCur = Math.abs(effSkew);  // 选中配对偏度, 否则25Δ基准
+  const dteCur = d.dte || 0;
+  const entryZ = THRESHOLDS.ENTRY_Z, entrySkew = THRESHOLDS.ENTRY_SKEW;
+  const exitSkew = THRESHOLDS.EXIT_SKEW,  exitZ = THRESHOLDS.EXIT_Z;
+  const stopZ   = THRESHOLDS.STOP_Z;
+  const stopDte = THRESHOLDS.STOP_DTE;
+  // 流动性: 优先用选中配对的合约(callLeg/putLeg), 否则 benchmark
+  var bc = callLeg || chain.benchmark_call || {}, bp = putLeg || chain.benchmark_put || {};
+  var callVol = bc.volume || 0, callOi = bc.open_interest || bc.oi || 0;
+  var putVol  = bp.volume || 0, putOi  = bp.open_interest || bp.oi || 0;
+  // 本地库历史成交量 (开盘时兜底)
+  var callLocalVol = bc.local_volume || 0, putLocalVol = bp.local_volume || 0;
+  if (bc.local_oi) callOi = bc.local_oi;
+  if (bp.local_oi) putOi = bp.local_oi;
+  // 流动性: (盘中vol≥50 或 历史日均≥500) 且 oi≥1000
+  // 名义持仓价值归一: 与后端一致, 用 oi*合约乘数*标的价格 替代统一绝对手数
+  var mult = d.contract_multiplier || 10;
+  var px = d.underlying_price || 0;
+  var notionalMin = THRESHOLDS.LIQ_NOTIONAL_WAN * 10000;
+  var callNotional = callOi * mult * px;
+  var putNotional = putOi * mult * px;
+  // 流动性: (盘中vol>=50 或 历史日均>=500) 且 名义持仓>=门槛(绝对oi>=下限防极端)
+  var liqOk = (callVol >= THRESHOLDS.LIQ_INTRADAY_VOL || callLocalVol >= THRESHOLDS.LIQ_HIST_VOL) && callNotional >= notionalMin && callOi >= THRESHOLDS.LIQ_OI_MIN
+           && (putVol >= THRESHOLDS.LIQ_INTRADAY_VOL || putLocalVol >= THRESHOLDS.LIQ_HIST_VOL) && putNotional >= notionalMin && putOi >= THRESHOLDS.LIQ_OI_MIN;
+  var entryIvPct = d.local_iv_percentile != null ? d.local_iv_percentile : (d.iv_percentile || 50);
+  var ivPctOk = entryIvPct > 50;
+  var allEntry = z0 >= entryZ && skCur > entrySkew && liqOk && ivPctOk;
+  // 止损 Z 阈值 (固定 2.5, 不是动态)
+  var stopZVal = THRESHOLDS.STOP_Z;
+
+  // ===== 开仓条件 =====
+  html += '<tr><td class="val-bold">开仓 #1</td><td class="val-green">|Z| ≥ ' + entryZ.toFixed(1) + '</td><td class="' + (z0 >= entryZ ? (allEntry ? 'val-green' : 'val-yellow') : 'val-red') + '">' + zCur.toFixed(2) + (z0 >= entryZ ? ' ✓' : ' ✗') + '</td></tr>';
+  html += '<tr><td class="val-bold">开仓 #2</td><td class="val-green">|IV_Skew| > ' + entrySkew.toFixed(0) + '%</td><td class="' + (skCur > entrySkew ? (allEntry ? 'val-green' : 'val-yellow') : 'val-red') + '">' + skCur.toFixed(2) + '%' + (skCur > entrySkew ? ' ✓' : ' ✗') + '</td></tr>';
+  html += '<tr><td class="val-bold">开仓 #3</td><td class="val-green">流动性: (盘中vol≥50 或 日均≥500) & 名义持仓≥'+THRESHOLDS.LIQ_NOTIONAL_WAN+'万</td><td class="' + (liqOk ? (allEntry ? 'val-green' : 'val-yellow') : 'val-red') + '">Call ' + callVol + '/' + callOi + ' | Put ' + putVol + '/' + putOi + (liqOk ? ' ✓' : ' ✗') + '</td></tr>';
+  html += '<tr><td class="val-bold">开仓 #4</td><td class="val-green">IV分位 &gt; 50% (隐波高于中位)</td><td class="' + (ivPctOk ? (allEntry ? 'val-green' : 'val-yellow') : 'val-red') + '">当前 ' + entryIvPct.toFixed(0) + '%' + (ivPctOk ? ' ✓' : ' ✗') + '</td></tr>';
+  if (allEntry) {
+    html += '<tr><td class="val-bold" style="color:#27AE60;">开仓状态</td><td colspan="2" class="val-green">✓ 三项全部满足, 可开仓入场</td></tr>';
+  } else {
+    html += '<tr><td class="val-bold" style="color:#E74C3C;">开仓状态</td><td colspan="2" class="val-red">✗ ' + (z0 < entryZ ? 'Z不足 ' : '') + (skCur <= entrySkew ? '|Skew|不足 ' : '') + (!liqOk ? '流动性不足 ' : '') + (!ivPctOk ? 'IV分位不足' : '') + '</td></tr>';
+  }
+
+  // ===== 止盈条件 (三选一) =====
+  // 假设入场时 |Skew|=8%, Z=1.5
+  html += '<tr><td class="val-bold">止盈 #1</td><td class="val-green">|Skew| 从≥' + entrySkew.toFixed(0) + '% 收敛至 ≤ ' + exitSkew.toFixed(0) + '%</td><td class="' + (skCur <= exitSkew ? 'val-green' : 'val-gray') + '">当前 |Skew|=' + skCur.toFixed(2) + '%' + (skCur <= exitSkew ? ' ✓ 触达' : '') + '</td></tr>';
+  html += '<tr><td class="val-bold">止盈 #2</td><td class="val-green">|Z| 从≥' + entryZ.toFixed(1) + ' 回落至 ≤ ' + exitZ.toFixed(1) + '</td><td class="' + (z0 <= exitZ ? 'val-green' : 'val-gray') + '">当前 |Z|=' + zCur.toFixed(2) + (z0 <= exitZ ? ' ✓ 触达' : '') + '</td></tr>';
+  html += '<tr><td class="val-bold">止盈 #3</td><td class="val-green">保证金收益 10%~15%</td><td class="val-gray">需入场后跟踪</td></tr>';
+  html += '<tr><td class="val-bold" style="color:#27AE60;">止盈状态</td><td colspan="2" class="val-gray">三条件任一触发即平仓</td></tr>';
+
+  // ===== 止损条件 =====
+  html += '<tr><td class="val-bold">止损 #1</td><td class="val-red">|Z| ≥ ' + stopZVal.toFixed(1) + '</td><td class="' + (z0 >= stopZVal ? 'val-red' : 'val-gray') + '">当前 |Z|=' + zCur.toFixed(2) + (z0 >= stopZVal ? ' ⚠ 触发' : '') + '</td></tr>';
+  html += '<tr><td class="val-bold">止损 #2</td><td class="val-red">时间止损: DTE &lt; ' + stopDte + '天</td><td class="' + (dteCur < stopDte ? 'val-red' : 'val-gray') + '">当前 DTE=' + dteCur + '天</td></tr>';
+  html += '<tr><td class="val-bold">止损 #3</td><td class="val-red">资金止损: 浮亏 ≥ 保证金×20%</td><td class="val-gray">需入场后跟踪</td></tr>';
+
+  // ===== 预期盈亏 (BS估算, 仅参考) =====
+  var dForPnl = selPair ? Object.assign({}, d, {call_iv_25d: selPair.call_iv, put_iv_25d: selPair.put_iv, iv_skew: selPair.skew}) : d;
+  var pnlEst = calcExpectedPnl(dForPnl, chain, callLeg, putLeg);  // 始终计算, 传入选中配对合约
+  // 预期盈亏描述——动态根据当前值生成
+  var tpPts = (Math.abs(effSkew||0) - THRESHOLDS.EXIT_SKEW).toFixed(1), slPts = ((THRESHOLDS.STOP_Z - Math.abs(d.z_score||0)) * THRESHOLDS.SIGMA_SKEW).toFixed(1);
+  html += '<tr><td class="val-bold">预期盈亏</td><td class="val-gray">盈: |Skew|→' + THRESHOLDS.EXIT_SKEW + '%(' + tpPts + 'pp) / 亏: |Z|→' + THRESHOLDS.STOP_Z + '(' + slPts + 'pp)</td><td class="' + (pnlEst.ratio >= 1 ? 'val-green' : 'val-red') + '">';
+  html += '盈 +' + pnlEst.win.toFixed(0) + ' 元 | 亏 -' + pnlEst.loss.toFixed(0) + ' 元 | 比 1:' + pnlEst.ratio.toFixed(2);
+  html += '</td></tr>';
+  // Delta中性配比: 优先用 selPair 预算的 call_lots/put_lots, 否则从 bc/bp delta 计算
+  var neutralCall, neutralPut, baseCD, basePD;
+  if (selPair && selPair.call_lots) {
+    neutralCall = selPair.call_lots; neutralPut = selPair.put_lots;
+    baseCD = Math.abs(selPair.call_delta); basePD = Math.abs(selPair.put_delta);
+  } else {
+    baseCD = (bc.delta||0.25), basePD = Math.abs(bp.delta||0.25);
+    var ratioCall = Math.round(basePD*100), ratioPut = Math.round(baseCD*100);
+    var ratioG = gcd(ratioCall, ratioPut);
+    neutralCall = ratioCall/ratioG, neutralPut = ratioPut/ratioG;
+  }
+  html += '<tr><td class="val-bold">Δ中性配比</td><td class="val-gray">卖Call:买Put = ' + neutralCall.toFixed(0) + ':' + neutralPut.toFixed(0) + ' (CallΔ=' + baseCD.toFixed(2) + ', PutΔ=' + basePD.toFixed(2) + ')</td><td class="val-gray">目标 Δ≈0</td></tr>';
+  html += '</tbody></table></div>';
+
+  // ── 多Delta偏度矩阵 (折叠展板) ──
+  var mds = d.multi_delta_skew || [];
+  if (mds.length > 0) {
+    // collect unique deltas for rows/cols
+    var callDeltas = [], putDeltas = [];
+    mds.forEach(function(e) {
+      if (callDeltas.indexOf(e.call_delta) < 0) callDeltas.push(e.call_delta);
+      if (putDeltas.indexOf(e.put_delta) < 0) putDeltas.push(e.put_delta);
+    });
+    callDeltas.sort(function(a,b){ return Math.abs(a)-Math.abs(b); });
+    putDeltas.sort(function(a,b){ return Math.abs(a)-Math.abs(b); });
+    var maxCnt = Math.max(callDeltas.length, putDeltas.length);
+    var cross = []; // 笛卡尔积矩阵
+    for (var ci=0; ci<callDeltas.length; ci++){
+      for (var pi=0; pi<putDeltas.length; pi++){
+        var m = mds.find(function(x){ return approxEq(x.call_delta, callDeltas[ci]) && approxEq(x.put_delta, putDeltas[pi]); });
+        cross.push(m||{call_delta:callDeltas[ci],put_delta:putDeltas[pi],skew:null,call_iv:null,put_iv:null,call_lots:1,put_lots:1});
+      }
+    }
+    html += '<div class="detail-section" onclick="var t=this.querySelector(\'.mds-body\'); t.style.display=t.style.display===\'none\'?\'\':\'none\';">';
+    html += '<h4 style="cursor:pointer;user-select:none;">▸ 多Δ偏度矩阵 (' + mds.length + '个配对)</h4>';
+    html += '<div class="mds-body" style="display:none;overflow-x:auto;margin-top:8px;">';
+    html += '<table class="detail-table" style="font-size:11px;"><thead><tr><th>CallΔ</th><th>PutΔ</th><th>CallIV</th><th>PutIV</th><th>Skew</th><th>Δ中性</th><th>Vol</th></tr></thead><tbody>';
+    for (var j=0; j<cross.length; j++){
+      var row = cross[j];
+      html += '<tr>';
+      html += '<td>' + (row.call_delta||0).toFixed(2) + '</td>';
+      html += '<td>' + (row.put_delta||0).toFixed(2) + '</td>';
+      html += '<td>' + (row.call_iv!=null?row.call_iv.toFixed(1)+'%':'—') + '</td>';
+      html += '<td>' + (row.put_iv!=null?row.put_iv.toFixed(1)+'%':'—') + '</td>';
+      html += '<td class="' + (row.skew!=null?(row.skew>0?'val-red':'val-green'):'val-gray') + '">' + (row.skew!=null?(row.skew>0?'+':'')+row.skew.toFixed(1)+'%':'—') + '</td>';
+      html += '<td class="val-gray">' + (row.call_lots||1) + ':' + (row.put_lots||1) + '</td>';
+      html += '<td class="val-gray">' + (row.volume||0) + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+  }
+
+  // ── 操作按钮 ──
+  html += '<div style="display:flex;gap:8px;margin-top:12px;">';
+  html += `<button class="btn btn-sm" onclick="toggleWatchlist('${d.product}')" id="wlBtn">⭐ 加入自选</button>`;
+  html += `<button class="btn btn-sm" onclick="exportCSV('${d.product}')">📥 导出CSV</button>`;
+  html += '</div>';
+
+  document.getElementById('panelBody').innerHTML = html;
+
+  // 渲染图表
+  requestAnimationFrame(() => {
+    renderPnlChart(d, chain, hist);
+    renderSmileChart(chain, d);
+    renderSkewTermChart(d);
+    updateWatchlistBtn(d.product);
+    // [双月] 重渲染当前激活的图表标签(含 hvenv/localiv/zscore), 使月切换后图表与选中月一致
+    switchChartTab(currentChartTab);
+  });
+}
+
+function cardHTML(label, value, sub, extraClass, valueClass) {
+  return `<div class="metric-card ${extraClass}">
+    <div class="label">${label}</div>
+    <div class="value ${valueClass}">${value}</div>
+    <div class="sub">${sub}</div>
+  </div>`;
+}
+
+function calcStd(hist) {
+  const vals = hist.map(h => h.skew || 0);
+  if (vals.length < 2) return 0;
+  const mean = vals.reduce((a,b)=>a+b,0)/vals.length;
+  return Math.sqrt(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length);
+}
+
+// ── 期权链渲染 ──
+function renderOptionChain(chain, d, clsLabel, selPair) {
+  const calls = chain.calls || [];
+  const puts = chain.puts || [];
+  const bCall = chain.benchmark_call || {};
+  const bPut = chain.benchmark_put || {};
+  // 选中配对的合约 symbol
+  const selCallSym = selPair ? selPair.call_symbol : null;
+  const selPutSym = selPair ? selPair.put_symbol : null;
+
+  // 合并所有行权价
+  const strikes = new Set();
+  calls.forEach(c => strikes.add(c.strike));
+  puts.forEach(p => strikes.add(p.strike));
+  const sortedStrikes = [...strikes].sort((a,b) => b-a);
+
+  let html = '<div class="option-chain"><table>';
+  html += '<thead><tr><th colspan="5">看涨期权</th><th>行权价</th><th colspan="5">认沽期权</th></tr>';
+  html += '<tr><th>买价</th><th>卖价</th><th>IV</th><th>Δ</th><th>量</th><th></th><th>量</th><th>Δ</th><th>IV</th><th>卖价</th><th>买价</th></tr></thead><tbody>';
+
+  sortedStrikes.forEach(strike => {
+    const c = calls.find(x => x.strike === strike);
+    const p = puts.find(x => x.strike === strike);
+    const isBenchmark = (c && c.symbol === bCall.symbol) || (p && p.symbol === bPut.symbol);
+    const isSelPair = (c && c.symbol === selCallSym) || (p && p.symbol === selPutSym);
+    const rowClass = isSelPair ? 'row-selpair' : (isBenchmark ? 'row-benchmark' : '');
+
+    html += `<tr class="${rowClass}">`;
+    if (c) {
+      html += `<td>${(c.bid||0).toFixed(1)}</td><td>${(c.ask||0).toFixed(1)}</td>`;
+      html += `<td class="val-red">${(c.iv||0).toFixed(1)}%</td>`;
+      html += `<td>${(c.delta||0).toFixed(2)}</td><td>${(c.volume||0)}</td>`;
+    } else {
+      html += '<td colspan="5" class="val-gray">—</td>';
+    }
+    html += `<td class="strike-col">${strike}${isBenchmark?'<span class="tag-benchmark">25Δ基准</span>':''}${isSelPair?'<span class="tag-selpair">当前配对</span>':''}</td>`;
+    if (p) {
+      html += `<td>${(p.volume||0)}</td><td>${(p.delta||0).toFixed(2)}</td>`;
+      html += `<td class="val-green">${(p.iv||0).toFixed(1)}%</td>`;
+      html += `<td>${(p.ask||0).toFixed(1)}</td><td>${(p.bid||0).toFixed(1)}</td>`;
+    } else {
+      html += '<td colspan="5" class="val-gray">—</td>';
+    }
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+  return html;
+}
+
+// ── ECharts 图表 ──
+let currentLots = 1;
+let currentStrategy = 'RR';
+
+// 最大公约数 (Delta中性比例)
+function gcd(a, b) { return b ? gcd(b, a % b) : a; }
+
+function switchStrategy(s) {
+  currentStrategy = s;
+  document.querySelectorAll('.strat-btn').forEach(function(b) {
+    b.classList.toggle('active', b.textContent.trim() === s);
+  });
+  if (currentDetail) renderDetailPanel(currentDetail);
+}
+
+function normCDF(x) {
+  if (x < -6) return 0;
+  if (x > 6) return 1;
+  var a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429;
+  var p=0.3275911, sign=x<0?-1:1; x=Math.abs(x)/Math.sqrt(2);
+  var t=1/(1+p*x), y=1-((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return 0.5*(1+sign*y);
+}
+
+function bsPrice(S, K, T, sigma, r, isCall) {
+  if (T <= 0) return isCall ? Math.max(S - K, 0) : Math.max(K - S, 0);
+  if (S <= 0 || K <= 0 || sigma <= 0) return 0;
+  var d1 = (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T));
+  var d2 = d1 - sigma * Math.sqrt(T);
+  if (isCall) return S * normCDF(d1) - K * Math.exp(-r * T) * normCDF(d2);
+  return K * Math.exp(-r * T) * normCDF(-d2) - S * normCDF(-d1);
+}
+
+// 预期盈亏估算（完整RR双腿BS定价, 方向自适应, ATM不变, 对称回归）
+function calcExpectedPnl(d, chain, callLeg, putLeg) {
+  try {
+    var S = d.underlying_price, T = (d.dte || 30) / 365, r = THRESHOLDS.RF_RATE, mult = d.contract_multiplier || 10;
+    // 用传入的合约(选中配对), 否则回退 benchmark
+    var bc = callLeg || chain.benchmark_call, bp = putLeg || chain.benchmark_put;
+    if (!bc || !bp || !bc.strike || !bp.strike) return {win:0, loss:0, ratio:0};
+    var cIV = d.call_iv_25d / 100, pIV = d.put_iv_25d / 100;
+    if (cIV <= 0 || pIV <= 0) return {win:0, loss:0, ratio:0};
+    // 用选中配对的IV (若有), 否则用25Δ基准
+    if (callLeg && callLeg.iv) cIV = callLeg.iv / 100;
+    if (putLeg && putLeg.iv) pIV = putLeg.iv / 100;
+    var cIn = bsPrice(S, bc.strike, T, cIV, r, true);
+    var pIn = bsPrice(S, bp.strike, T, pIV, r, false);
+    // Delta 中性手数比例 (用实际合约 delta)
+    var cd = Math.abs(bc.delta || 0.25), pd = Math.abs(bp.delta || 0.25);
+    var rc = Math.round(pd * 100), rp = Math.round(cd * 100);
+    var gn = gcd(rc, rp);
+    var neutralC = rc / gn, neutralP = rp / gn;
+    var midIV = (cIV + pIV) / 2;             // 平值 IV (ATM)
+    var curSkew = Math.abs(d.iv_skew || 0);   // 当前 |Skew|(%)
+    var curZ = Math.abs(d.z_score || 0);       // 当前 |Z|
+    var sigmaSkew = THRESHOLDS.SIGMA_SKEW;                      // 历史偏度标准差(pp)
+    // [Bug修复] 方向判断: long_skew(Call贵, skew>0) → 卖Call+买Put; short_skew(Put贵, skew<0) → 卖Put+买Call
+    var isLongSkew = (d.iv_skew || 0) >= 0;
+    var sign = isLongSkew ? 1 : -1;  // IV偏移方向: long=Call贵, short=Put贵
+    // === 预期盈利: |Skew| 收敛至 2%, Call/Put 对称回归 ===
+    var convergePts = Math.max(0, curSkew - THRESHOLDS.EXIT_SKEW);
+    var cIV_tp = midIV + sign * THRESHOLDS.EXIT_SKEW / 2 / 100;   // 收敛后: 贵方降1%
+    var pIV_tp = midIV - sign * THRESHOLDS.EXIT_SKEW / 2 / 100;   // 收敛后: 便宜方升1%
+    if (cIV_tp <= 0 || pIV_tp <= 0) return {win:0, loss:0, ratio:0};
+    var cTP = bsPrice(S, bc.strike, T, cIV_tp, r, true);
+    var pTP = bsPrice(S, bp.strike, T, pIV_tp, r, false);
+    var expWin;
+    if (isLongSkew) {
+      // 卖Call(价跌赚) + 买Put(价涨赚)
+      expWin = Math.abs((cIn - cTP) * mult * neutralC + (pTP - pIn) * mult * neutralP);
+    } else {
+      // 卖Put(价跌赚) + 买Call(价涨赚)
+      expWin = Math.abs((cTP - cIn) * mult * neutralC + (pIn - pTP) * mult * neutralP);
+    }
+    // === 预期亏损: |Z| 扩大至 2.5 → |Skew| = 当前Skew + Z扩大空间×σ ===
+    var zExpand = Math.max(0, 2.5 - curZ);
+    var skewStop = curSkew + sigmaSkew * zExpand;
+    var cIV_sl = midIV + sign * skewStop / 2 / 100;
+    var pIV_sl = midIV - sign * skewStop / 2 / 100;
+    if (cIV_sl >= 5.0 || pIV_sl <= 0) return {win:expWin, loss:0, ratio:0};
+    var cSL = bsPrice(S, bc.strike, T, cIV_sl, r, true);
+    var pSL = bsPrice(S, bp.strike, T, pIV_sl, r, false);
+    var expLoss;
+    if (isLongSkew) {
+      // 卖Call(价涨亏) + 买Put(价跌亏)
+      expLoss = Math.abs((cSL - cIn) * mult * neutralC + (pSL - pIn) * mult * neutralP);
+    } else {
+      // 卖Put(价涨亏) + 买Call(价跌亏)
+      expLoss = Math.abs((cIn - cSL) * mult * neutralC + (pIn - pSL) * mult * neutralP);
+    }
+    var ratio = expLoss > 0 ? expWin / expLoss : 0;
+    return {win: expWin, loss: expLoss, ratio: ratio};
+  } catch(e) { return {win:0, loss:0, ratio:0}; }
+}
+
+function renderPnlChart(d, chain, hist) {
+  var dom = document.getElementById('chartPnl');
+  if (!dom) return;
+  if (chartInstances.pnl) chartInstances.pnl.dispose();
+  var price = d.underlying_price || 3000, dte = d.dte || 30;
+  // 选中配对: IV 用配对, 否则 25Δ 基准
+  var selPairNow = findSelPair(d, currentPairKey);
+  var callIV = ((selPairNow ? selPairNow.call_iv : d.call_iv_25d) || 20) / 100;
+  var putIV  = ((selPairNow ? selPairNow.put_iv  : d.put_iv_25d) || 20) / 100;
+  // 选中配对: 合约用配对的 symbol, 否则基准
+  var bc = chain.benchmark_call || {}, bp = chain.benchmark_put || {};
+  if (selPairNow && chain.calls && chain.puts) {
+    var cSym = selPairNow.call_symbol, pSym = selPairNow.put_symbol;
+    if (cSym) bc = chain.calls.find(x => x.symbol === cSym) || bc;
+    if (pSym) bp = chain.puts.find(x => x.symbol === pSym)  || bp;
+  }
+  var callStrike = bc.strike || price * 1.03, putStrike = bp.strike || price * 0.97;
+  var callDelta = bc.delta || 0.5, putDelta = bp.delta || -0.5;
+  var ivSkew = selPairNow ? selPairNow.skew : (d.iv_skew || 0);
+  var isLongSkew = ivSkew < 0, lots = currentLots, strat = currentStrategy;
+  var stepCount = THRESHOLDS.PNL_STEPS, pRange = price * THRESHOLDS.PNL_RANGE;
+  var xData = [], pnlData = [], xNum = [];
+  var rf = THRESHOLDS.RF_RATE, T = dte / 365;
+  var entryCall = bsPrice(price, callStrike, T, callIV, rf, true);
+  var entryPut = bsPrice(price, putStrike, T, putIV, rf, false);
+  // 合约乘数: 后端 detail API 返回的 1手=N 吨/克/张, 缺省 10(商品主流)
+  var mult = d.contract_multiplier || 10;
+  // Ratio: 卖贵侧1手 + 买便宜侧2手(赌偏度回归)
+  var callMult = (strat === 'Ratio') ? (isLongSkew ? 1 : 1) : 1;
+  var putMult  = (strat === 'Ratio') ? (isLongSkew ? 2 : 2) : 1;
+  // 方向: isLongSkew(Put贵)→买Call+卖Put; 否则(Call贵)→卖Call+买Put
+  var useReverse = isLongSkew;  // 方向反转标记
+  var netDelta = isLongSkew ? (callDelta - putDelta) : (putDelta - callDelta);
+  for (var i = 0; i < stepCount; i++) {
+    var p = price + pRange * (i - (stepCount-1)/2) / ((stepCount-1)/2);
+    xData.push(p.toFixed(0)); xNum.push(p);
+    var rCall = bsPrice(p, callStrike, T, callIV, rf, true);
+    var rPut = bsPrice(p, putStrike, T, putIV, rf, false);
+    // 默认: 卖Call+买Put; useReverse: 买Call+卖Put
+    var pnl = useReverse
+      ? (rCall - entryCall) * callMult + (entryPut - rPut) * putMult
+      : (entryCall - rCall) * callMult + (rPut - entryPut) * putMult;
+    if (strat === 'DDH') pnl += -netDelta * (p - price) * lots * mult;
+    pnl = pnl * lots * mult;  // 补乘合约乘数: BS返回"点", 真实盈亏=点×手×乘数
+    pnlData.push(pnl.toFixed(0));
+  }
+  var pnlNum = pnlData.map(function(v){return +v;});
+  var maxLoss = Math.min.apply(Math, pnlNum);
+  var stopLoss = Math.min(maxLoss * THRESHOLDS.STOP_LOSS_RATIO, THRESHOLDS.STOP_LOSS_MIN);
+  var stratN = {RR: '风险逆转', DDH: 'Delta对冲', Ratio: '比率价差 2:1'};
+  var isLC = isLongSkew ? '#27AE60' : '#E74C3C';
+  var option = {
+    tooltip: { trigger: 'axis', formatter: function(p){return '标的价格: ' + xData[p[0].dataIndex] + '<br>盈亏: ￥' + p[0].value;} },
+    grid: { left: 55, right: 25, top: 40, bottom: 48 },
+    title: { text: 'BS实时 · ' + stratN[strat] + ' · ' + (isLongSkew ? '卖Put+买Call' : '卖Call+买Put') + ' · ' + lots + ' lot', left: 'center', textStyle: { fontSize: 13, color: '#333', fontWeight: 'normal' } },
+    xAxis: { type: 'category', data: xData, name: '标的价格', axisLine: { lineStyle: { color: '#E0E0E0' } } },
+    yAxis: { type: 'value', name: '盈亏(元)', axisLine: { lineStyle: { color: '#E0E0E0' } }, splitLine: { lineStyle: { color: '#F0F0F0' } } },
+    series: [{ type: 'line', data: pnlData, smooth: true,
+      lineStyle: { color: isLC, width: 2 },
+      areaStyle: { color: isLongSkew ? 'rgba(39,174,96,0.08)' : 'rgba(231,76,60,0.08)' },
+      markLine: { silent: true, data: [
+        { xAxis: price.toFixed(0), label: { formatter: '当前价\n' + price.toFixed(0) }, lineStyle: { color: '#7F8C8D', type: 'dashed' } },
+        { yAxis: 0, label: { formatter: '盈亏平衡' }, lineStyle: { color: '#7F8C8D', type: 'dashed' } },
+        { yAxis: stopLoss, label: { formatter: '止损 ' + stopLoss.toFixed(0), fontSize: 10 }, lineStyle: { color: '#E74C3C', type: 'dotted' } }]},
+      markArea: { silent: true, data: [[{ yAxis: 0, itemStyle: { color: 'rgba(39,174,96,0.06)' } }, { yAxis: 999999, itemStyle: { color: 'rgba(39,174,96,0.06)' } }]] },
+      markPoint: { symbolSize: 8, itemStyle: { color: '#2C3E50' }, data: [{ name: '当前', coord: [iFindX(xData, price), pnlAtPrice(xNum, pnlData, price)], value: '当前' }] }
+    }]
+  };
+  chartInstances.pnl = echarts.init(dom);
+  chartInstances.pnl.setOption(option);
+}
+function iFindX(xData, price) { for (let i = 0; i < xData.length; i++) { if (+xData[i] >= price) return xData[i]; } return xData[xData.length-1]; }
+function pnlAtPrice(xNum, pnlData, price) { let best = 0, bestDist = Infinity; for (let i = 0; i < xNum.length; i++) { if (Math.abs(xNum[i] - price) < bestDist) { bestDist = Math.abs(xNum[i] - price); best = +pnlData[i]; } } return best; }
+
+function renderSmileChart(chain, sd) {
+  var dom = document.getElementById('chartSmile');
+  if (!dom) return;
+  if (chartInstances.smile) chartInstances.smile.dispose();
+
+  var calls = chain.calls || [];
+  var puts = chain.puts || [];
+  var price = chain.underlying_price || ((chain.benchmark_call||{}).strike + (chain.benchmark_put||{}).strike) / 2;
+  if (!calls.length && !puts.length) {
+    dom.innerHTML = '<div style="padding:24px;color:#999;font-size:13px;">期权链数据暂缺</div>';
+    return;
+  }
+
+  var putC = puts.map(function(p){return [+p.strike, +p.iv]}).filter(function(d){return d[0] < price}).sort(function(a,b){return a[0]-b[0]});
+  var callC = calls.map(function(c){return [+c.strike, +c.iv]}).filter(function(d){return d[0] >= price}).sort(function(a,b){return a[0]-b[0]});
+  var atmCall = callC.length ? callC[0] : [price, (sd&&sd.avg_iv)||0];
+  var atmIV = atmCall[1];
+  var uCurve = putC.concat(callC);
+
+  // 昨日虚线：按比例近似昨日IV (偏斜方向不变, 整体偏移 -0.5%)
+  var yesterdayShift = -0.5;
+  var yestCurve = uCurve.map(function(d){return [d[0], +(d[1] + yesterdayShift).toFixed(2)]});
+
+  var minStrike = uCurve[0][0];
+  var maxStrike = uCurve[uCurve.length-1][0];
+
+  // 持仓量柱 - 看涨 + 看跌 stack 叠加 (OpenVlab风格)
+  var callVol = calls.map(function(c){return [c.strike, c.volume||0]}).sort(function(a,b){return a[0]-b[0]});
+  var putVol = puts.map(function(p){return [p.strike, p.volume||0]}).sort(function(a,b){return a[0]-b[0]});
+  // 净持仓: 计算每行权价 call_vol - put_vol, 正数=净多, 负数=净空
+  var volMap = {};
+  calls.forEach(function(c){ volMap[c.strike] = (volMap[c.strike]||0) + (c.volume||0); });
+  puts.forEach(function(p){ volMap[p.strike] = (volMap[p.strike]||0) - (p.volume||0); });
+  // 用 netVol 来调整每根柱子的红绿透明度: 净多->红色更显, 净空->绿色更显
+  // 但柱子必须叠加显示总持仓, 所以保留 stack vol
+  var maxVol = Math.max(1, Math.max.apply(Math,calls.map(function(c){return c.volume||0})), Math.max.apply(Math,puts.map(function(p){return p.volume||0})));
+
+  // Y轴隐波: 固定范围让变化更明显 (OpenVlab 风格)
+  var allIVs = uCurve.map(function(d){return d[1]});
+  var ivMin = Math.min.apply(Math, allIVs);
+  var ivMax = Math.max.apply(Math, allIVs);
+  var ivRange = ivMax - ivMin;
+  var yMin = Math.floor((ivMin - ivRange*0.3) / 2) * 2;
+  var yMax = Math.ceil((ivMax + ivRange*0.3) / 2) * 2;
+
+  var fc = (sd&&sd.futures_code)||chain.underlying_code||'';
+  var m = fc.match(/([A-Za-z]{2,})(\d{4})/);
+  var monthTag = m ? m[1].toUpperCase()+m[2] : fc;
+  var dte = (sd&&sd.dte)||0;
+  var pchg = sd && sd.underlying_price_percentile != null ? sd.underlying_price_percentile : 0;
+  var pchgStr = (pchg>=0?'+':'') + pchg.toFixed(2) + '%';
+
+  var option = {
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: '#7F8C8D', type: 'dashed' } },
+      formatter: function(params) {
+        var strike = params[0].axisValue;
+        var s = '<b>行权价: ' + strike + '</b>';
+        var callP = null, putP = null, netP = 0, callV = 0, putV = 0;
+        params.forEach(function(p) {
+          if (p.seriesName === '今日' && p.data[1] != null) callP = {v: p.data[1]};
+          if (p.seriesName === '昨日(估算)' && p.data[1] != null) putP = {v: p.data[1]};
+          if (p.seriesName === '看涨持仓') callV = p.data[1];
+          if (p.seriesName === '看跌持仓') putV = p.data[1];
+        });
+        // 净持仓: 从 volMap 算
+        netP = (volMap[strike] || 0);
+        if (callP) s += '<br/>今日IV: <b>' + callP.v.toFixed(2) + '%</b>';
+        if (putP) s += '<br/>昨日IV(估算): <b>' + putP.v.toFixed(2) + '%</b>';
+        s += '<br/>看涨: ' + callV + ' | 看跌: ' + putV;
+        s += '<br/>净持仓: ' + (netP>=0?'+':'') + netP;
+        return s;
+      }
+    },
+    legend: { data: ['今日','昨日(估算)','看涨持仓','看跌持仓'],
+      top: 38, left: 80, itemWidth: 14, itemHeight: 8, textStyle: { fontSize: 11, color: '#666' } },
+    grid: { left: 60, right: 65, top: 58, bottom: 50 },
+    title: [
+      { text: monthTag + ' \u00b7 ' + dte + '\u5929\u5230\u671f', left: 14, top: 6, textStyle: { fontSize: 13, color: '#999' } },
+      { text: price.toFixed(2) + ' (' + pchgStr + ')', left: 'center', top: 6, textStyle: { fontSize: 15, color: '#2980B9', fontWeight: 'bold' } },
+      { text: atmIV.toFixed(2), right: 16, top: 6, textStyle: { fontSize: 15, color: '#16A085', fontWeight: 'bold' } }
+    ],
+    xAxis: {
+      type: 'value', name: '\u884C\u6743\u4EF7',
+      min: minStrike, max: maxStrike,
+      axisLine: { lineStyle: { color: '#D5D8DC' } },
+      axisLabel: { fontSize: 10, color: '#888' },
+      splitLine: { show: false }
+    },
+    yAxis: [
+      { type: 'value', name: '\u9690\u6CE2(%)', position: 'left',
+        min: yMin, max: yMax,
+        axisLine: { lineStyle: { color: '#D5D8DC' } },
+        splitLine: { lineStyle: { color: '#F0F0F0' } },
+        axisLabel: { fontSize: 10, color: '#888' } },
+      { type: 'value', name: '\u6301\u4ED3\u91CF', position: 'right',
+        axisLine: { lineStyle: { color: '#D5D8DC' } },
+        splitLine: { show: false },
+        axisLabel: { fontSize: 10, color: '#888' },
+        max: maxVol * 5, min: 0 }
+    ],
+    series: [
+      { name: '\u4ECA\u65E5', type: 'line', data: uCurve, smooth: false,
+        symbol: 'emptyCircle', symbolSize: 8,
+        itemStyle: { color: '#9b59b6', borderWidth: 2 },
+        lineStyle: { color: '#9b59b6', width: 3 },
+        markLine: { silent: true, symbol: 'none',
+          data: [{ xAxis: price, lineStyle: { color: '#2980B9', width: 1.5 } }] },
+        z: 5 },
+      { name: '昨日(估算)', type: 'line', data: yestCurve, smooth: false,
+        symbol: 'emptyCircle', symbolSize: 5,
+        itemStyle: { color: '#95A5A6', borderWidth: 1 },
+        lineStyle: { color: '#95A5A6', width: 1.5, type: 'dashed' },
+        z: 4 },
+      // 看涨持仓 + 看跌持仓 stack 叠加 (OpenVlab 风格: 同根柱子红绿叠加)
+      { name: '\u770B\u6DA8\u6301\u4ED3', type: 'bar', data: callVol, yAxisIndex: 1, stack: 'vol',
+        itemStyle: { color: 'rgba(231,76,60,0.65)' }, barWidth: '60%' },
+      { name: '\u770B\u8DCC\u6301\u4ED3', type: 'bar', data: putVol, yAxisIndex: 1, stack: 'vol',
+        itemStyle: { color: 'rgba(46,204,113,0.65)' }, barWidth: '60%' }
+    ]
+  };
+  chartInstances.smile = echarts.init(dom);
+  chartInstances.smile.setOption(option);
+}
+function renderSkewTermChart(d) {
+  const dom = document.getElementById('chartSkewTerm');
+  if (!dom) return;
+  if (chartInstances.skewterm) chartInstances.skewterm.dispose();
+  const multi = d.multi_skew || [];
+  if (!multi.length) { dom.innerHTML = '<div style="padding:24px;color:#999;font-size:13px;">多档偏度数据暂缺（需≥2档合约）</div>'; return; }
+
+  const xData = multi.map(m => `OTM${m.level}(Δ≈${(25-m.level*5)})`);
+  const callIVs = multi.map(m => +m.call_iv);
+  const putIVs = multi.map(m => +m.put_iv);
+  const skews = multi.map(m => +m.skew);
+  const maxIV = Math.max(...callIVs, ...putIVs);
+  const minIV = Math.min(...callIVs, ...putIVs);
+  const ivRange = maxIV - minIV || 5;
+
+  const option = {
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const idx = params[0].dataIndex;
+        const m = multi[idx];
+        return `<b>OTM${m.level} (Δ≈${25-m.level*5})</b><br/>
+认购 IV: <b style="color:#E74C3C">${m.call_iv}%</b> · 认沽 IV: <b style="color:#27AE60">${m.put_iv}%</b><br/>
+偏度(C-P): <b style="color:${m.skew>=0?'#E74C3C':'#27AE60'}">${m.skew}%</b><br/>
+成交量权重: ${m.volume_weight}`;
+      }
+    },
+    grid: { left: 55, right: 60, top: 42, bottom: 50 },
+    title: { text: `${d.display_name||d.product} · 偏度期限结构`, left: 'center', textStyle: { fontSize: 13, color: '#333', fontWeight: 'normal' } },
+    xAxis: { type: 'category', data: xData, axisLine: { lineStyle: { color: '#E0E0E0' } }, axisLabel: { fontSize: 10 } },
+    yAxis: [
+      { type: 'value', name: 'IV(%)', position: 'left',
+        min: Math.max(0, minIV - ivRange * 0.2), max: maxIV + ivRange * 0.15,
+        axisLine: { lineStyle: { color: '#E74C3C' } },
+        splitLine: { lineStyle: { color: '#F5F5F5' } },
+        axisLabel: { fontSize: 10 } },
+      { type: 'value', name: 'Skew(%)', position: 'right',
+        axisLine: { lineStyle: { color: '#16A085' } },
+        splitLine: { show: false },
+        axisLabel: { fontSize: 10 } }
+    ],
+    series: [
+      { name: '认购IV', type: 'line', data: callIVs, smooth: false,
+        symbol: 'circle', symbolSize: 8, itemStyle: { color: '#E74C3C' },
+        lineStyle: { color: '#E74C3C', width: 2.5 },
+        label: { show: true, position: 'top', formatter: '{c}%', fontSize: 10, color: '#E74C3C' } },
+      { name: '认沽IV', type: 'line', data: putIVs, smooth: false,
+        symbol: 'circle', symbolSize: 8, itemStyle: { color: '#27AE60' },
+        lineStyle: { color: '#27AE60', width: 2.5 },
+        label: { show: true, position: 'bottom', formatter: '{c}%', fontSize: 10, color: '#27AE60' } },
+      { name: '偏度(C-P)', type: 'bar', data: skews.map(v => v), yAxisIndex: 1,
+        itemStyle: { color: '#16A085', borderRadius: [2,2,0,0] },
+        barWidth: 24,
+        label: { show: true, position: 'top', formatter: p => p.value.toFixed(2) + '%', fontSize: 9, color: '#16A085' },
+        markLine: { silent: true, symbol: 'none',
+          data: [{ yAxis: 0, lineStyle: { color: '#7F8C8D', type: 'dashed' } }]
+        }
+      }
+    ]
+  };
+  chartInstances.skewterm = echarts.init(dom);
+  chartInstances.skewterm.setOption(option);
+}
+
+function renderHvEnvChart(d) {
+  const dom = document.getElementById('chartHvEnv');
+  if (!dom) return;
+  const series = d.underlying_hv_series || [];
+  if (!series.length) {
+    dom.innerHTML = '<div style="padding:24px;color:#999;font-size:13px;">本地期权库无该品种HV历史（真实波动率基线缺失）</div>';
+    return;
+  }
+  const dates = series.map(s => s.date);
+  const hvs = series.map(s => s.hv);
+  const mean = d.underlying_hv_mean;
+  const std = d.underlying_hv_std;
+  const last = hvs[hvs.length - 1];
+  const pct = d.underlying_hv_percentile;
+  const plus2 = (mean != null && std != null) ? +(mean + 2 * std).toFixed(1) : null;
+  const minus2 = (mean != null && std != null) ? +(mean - 2 * std).toFixed(1) : null;
+  const option = {
+    grid: { left: 50, right: 25, top: 38, bottom: 46 },
+    tooltip: { trigger: 'axis', valueFormatter: v => (v==null ? '-' : v + '%') },
+    title: { text: `${d.display_name||d.product} · HV分位(标的波动率)`, left: 'center', textStyle: { fontSize: 13, color: '#333', fontWeight: 'normal' } },
+    xAxis: { type: 'category', data: dates, boundaryGap: false, axisLabel: { fontSize: 10, color: '#888', rotate: 30 } },
+    yAxis: { type: 'value', name: 'HV %', scale: true, nameTextStyle: { fontSize: 10, color: '#888' }, axisLabel: { fontSize: 10, color: '#888' }, splitLine: { lineStyle: { color: '#eee' } } },
+    series: [{
+      name: 'HV', type: 'line', data: hvs, smooth: true, showSymbol: false,
+      lineStyle: { color: '#2C7BE5', width: 2 },
+      areaStyle: { color: 'rgba(44,123,229,0.08)' },
+      markLine: (mean != null) ? {
+        silent: true, symbol: 'none',
+        data: [
+          { yAxis: mean, label: { formatter: `均值 ${mean}%`, color: '#E67E22', fontSize: 10 }, lineStyle: { color: '#E67E22', type: 'dashed' } },
+          plus2 != null ? { yAxis: plus2, label: { formatter: `+2σ ${plus2}%`, color: '#E74C3C', fontSize: 9 }, lineStyle: { color: '#E74C3C', type: 'dotted' } } : {},
+          minus2 != null ? { yAxis: minus2, label: { formatter: `-2σ ${minus2}%`, color: '#27AE60', fontSize: 9 }, lineStyle: { color: '#27AE60', type: 'dotted' } } : {}
+        ].filter(d => d.yAxis != null)
+      } : undefined,
+      markPoint: {
+        symbolSize: 8, itemStyle: { color: '#E74C3C' },
+        data: [{ name: '最新', coord: [dates[dates.length - 1], last], value: `${last}%` + (pct != null ? ` (分位${pct}%)` : '') }]
+      }
+    }]
+  };
+  chartInstances.hvenv = echarts.init(dom);
+  chartInstances.hvenv.setOption(option);
+}
+
+function renderLocalIvChart(d) {
+  const dom = document.getElementById('chartLocalIv');
+  if (!dom) return;
+  const series = d.local_iv_series || [];
+  if (!series.length) {
+    dom.innerHTML = '<div style="padding:24px;color:#999;font-size:13px;">本地期权库无该品种IV历史（真实交易所IV缺失）</div>';
+    return;
+  }
+  const dates = series.map(s => s.date);
+  const ivs = series.map(s => s.iv);
+  const mean = d.local_iv_mean;
+  const std = d.local_iv_std;
+  const last = ivs[ivs.length - 1];
+  const pct = d.local_iv_percentile;
+  const plus2 = (mean != null && std != null) ? +(mean + 2 * std).toFixed(1) : null;
+  const minus2 = (mean != null && std != null) ? +(mean - 2 * std).toFixed(1) : null;
+  const option = {
+    grid: { left: 50, right: 25, top: 38, bottom: 46 },
+    tooltip: { trigger: 'axis', valueFormatter: v => (v==null ? '-' : v + '%') },
+    title: { text: `${d.display_name||d.product} · IV分位(平值隐波)`, left: 'center', textStyle: { fontSize: 13, color: '#333', fontWeight: 'normal' } },
+    xAxis: { type: 'category', data: dates, boundaryGap: false, axisLabel: { fontSize: 10, color: '#888', rotate: 30 } },
+    yAxis: { type: 'value', name: 'IV %', scale: true, nameTextStyle: { fontSize: 10, color: '#888' }, axisLabel: { fontSize: 10, color: '#888' }, splitLine: { lineStyle: { color: '#eee' } } },
+    series: [{
+      name: 'IV', type: 'line', data: ivs, smooth: true, showSymbol: false,
+      lineStyle: { color: '#8E44AD', width: 2 },
+      areaStyle: { color: 'rgba(142,68,173,0.06)' },
+      markLine: (mean != null) ? {
+        silent: true, symbol: 'none',
+        data: [
+          { yAxis: mean, label: { formatter: `均值 ${mean}%`, color: '#E67E22', fontSize: 10 }, lineStyle: { color: '#E67E22', type: 'dashed' } },
+          plus2 != null ? { yAxis: plus2, label: { formatter: `+2σ ${plus2}%`, color: '#E74C3C', fontSize: 9 }, lineStyle: { color: '#E74C3C', type: 'dotted' } } : {},
+          minus2 != null ? { yAxis: minus2, label: { formatter: `-2σ ${minus2}%`, color: '#27AE60', fontSize: 9 }, lineStyle: { color: '#27AE60', type: 'dotted' } } : {}
+        ].filter(d => d.yAxis != null)
+      } : undefined,
+      markPoint: {
+        symbolSize: 8, itemStyle: { color: '#E74C3C' },
+        data: [{ name: '最新', coord: [dates[dates.length - 1], last], value: `${last}%` + (pct != null ? ` (分位${pct}%)` : '') }]
+      }
+    }]
+  };
+  chartInstances.localiv = echarts.init(dom);
+  chartInstances.localiv.setOption(option);
+}
+
+function renderZScoreChart(detail) {
+  const dom = document.getElementById('chartZScore');
+  if (!dom) return;
+  const zs = detail.z_scores || [];
+  if (!zs.length) {
+    dom.innerHTML = '<div style="padding:24px;color:#999;font-size:13px;">Z值历史不足（需≥5个交易日积累，约1个月成熟）</div>';
+    return;
+  }
+  const dates = zs.map(s => s.date);
+  const zvals = zs.map(s => s.z);
+  const last = zvals[zvals.length - 1];
+  const name = detail.skew_data?.display_name || detail.skew_data?.product || '';
+  const chk = v => {
+    if (v > 1.5 || v < -1.5) return '#FDEDEC';
+    if (v > 0.8 || v < -0.8) return '#FEF9E7';
+    return '#D5F5E3';
+  };
+  const option = {
+    grid: { left: 50, right: 25, top: 38, bottom: 46 },
+    tooltip: { trigger: 'axis', valueFormatter: v => (v==null ? '-' : v) },
+    title: { text: `${name} · Z值历史走势`, left: 'center', textStyle: { fontSize: 13, color: '#333', fontWeight: 'normal' } },
+    xAxis: { type: 'category', data: dates, boundaryGap: false, axisLabel: { fontSize: 10, color: '#888', rotate: 30 } },
+    yAxis: { type: 'value', name: 'Z', scale: false, min: -3.5, max: 3.5, nameTextStyle: { fontSize: 10, color: '#888' }, axisLabel: { fontSize: 10, color: '#888' }, splitLine: { lineStyle: { color: '#eee' } } },
+    series: [{
+      name: 'Z值', type: 'line', data: zvals, smooth: true, showSymbol: false,
+      lineStyle: { color: '#16A085', width: 2 },
+      areaStyle: { color: 'rgba(22,160,133,0.06)' },
+      markLine: {
+        silent: true, symbol: 'none',
+        data: [
+          { yAxis: 1.5, label: { formatter: '+1.5', color: '#E67E22', fontSize: 9 }, lineStyle: { color: '#E67E22', type: 'dashed' } },
+          { yAxis: -1.5, label: { formatter: '-1.5', color: '#E67E22', fontSize: 9 }, lineStyle: { color: '#E67E22', type: 'dashed' } },
+          { yAxis: 2.0, label: { formatter: '+2.0', color: '#E74C3C', fontSize: 9 }, lineStyle: { color: '#E74C3C', type: 'dotted' } },
+          { yAxis: -2.0, label: { formatter: '-2.0', color: '#E74C3C', fontSize: 9 }, lineStyle: { color: '#E74C3C', type: 'dotted' } }
+        ]
+      },
+      markArea: {
+        silent: true,
+        data: [
+          [{ yAxis: 1.5, itemStyle: { color: 'rgba(231,76,60,0.06)' } }, { yAxis: 3.5, itemStyle: { color: 'rgba(231,76,60,0.06)' } }],
+          [{ yAxis: -3.5, itemStyle: { color: 'rgba(231,76,60,0.06)' } }, { yAxis: -1.5, itemStyle: { color: 'rgba(231,76,60,0.06)' } }]
+        ]
+      },
+      markPoint: {
+        symbolSize: 8, itemStyle: { color: Math.abs(last) >= 1.5 ? '#E74C3C' : '#2C3E50' },
+        data: [{ name: '最新', coord: [dates[dates.length - 1], last], value: `Z=${last.toFixed(2)}` }]
+      }
+    }]
+  };
+  chartInstances.zscore = echarts.init(dom);
+  chartInstances.zscore.setOption(option);
+}
+
+function switchChartTab(tab) {
+  currentChartTab = tab || 'pnl';
+  document.querySelectorAll('.chart-tab').forEach(t => {
+    const oc = t.getAttribute('onclick') || '';
+    t.classList.toggle('active', oc.indexOf("'" + currentChartTab + "'") >= 0);
+  });
+  document.getElementById('chartPnl').style.display = tab === 'pnl' ? '' : 'none';
+  document.getElementById('chartSmile').style.display = tab === 'smile' ? '' : 'none';
+  document.getElementById('chartSkewTerm').style.display = tab === 'skewterm' ? '' : 'none';
+  document.getElementById('chartHvEnv').style.display = tab === 'hvenv' ? '' : 'none';
+  document.getElementById('chartLocalIv').style.display = tab === 'localiv' ? '' : 'none';
+  document.getElementById('chartZScore').style.display = tab === 'zscore' ? '' : 'none';
+  document.getElementById('lotSelector').style.display = tab === 'pnl' ? '' : 'none';
+  document.getElementById('strategySelector').style.display = tab === 'pnl' ? '' : 'none';
+
+  if (tab === 'smile') { const a = getActiveDetail(currentDetail); renderSmileChart(a.chain || {}, a.d || {}); }
+  if (tab === 'skewterm') renderSkewTermChart((getActiveDetail(currentDetail).d) || {});
+  if (tab === 'pnl') { const a = getActiveDetail(currentDetail); renderPnlChart(a.d || {}, a.chain || {}, currentDetail?.history || []); }
+  if (tab === 'hvenv') renderHvEnvChart((getActiveDetail(currentDetail).d) || {});
+  if (tab === 'localiv') renderLocalIvChart((getActiveDetail(currentDetail).d) || {});
+  if (tab === 'zscore') renderZScoreChart(currentDetail || {});
+}
+
+const chartHelpTexts = {
+  'pnl': '<b>策略盈亏图</b><br>RR = 风险逆转 (卖贵+买便宜, 赌偏度回归)<br>DDH = Delta对冲逆转 (RR + 期货对冲, 纯Vega赌注)<br>横轴 = 标的价格（±15%范围）<br>纵轴 = 到期盈亏（元）<br>绿区 = 盈利区<br>红色虚线 = 止损线（最大回撤20%）<br>蓝色虚线 = 当前价, 灰色虚线 = 盈亏平衡<br>右上 1x/5x/10x 切换手数',
+  'smile': '<b>波动率微笑</b><br>X轴 = 行权价<br>Y轴左 = 隐波 IV%<br>Y轴右 = 持仓量（红看涨/绿看跌叠加）<br>紫线 = 今日波动率（实线）<br>灰虚线 = 昨日波动率（估）<br>U形曲线越平 = 市场对偏度无预期',
+  'skewterm': '<b>偏度期限结构</b><br>X轴 = 虚值档位 OTM1~OTM5（Δ≈20~0）<br>左Y轴 = Call/Put IV（红/绿折线）<br>右Y轴 = 偏度% (C-P)<br>偏度 > 0 = 看涨预期（Call贵）<br>偏度 < 0 = 看跌预期（Put贵）',
+  'hvenv': '<b>波动率环境</b><br>X轴 = 日期（365天）<br>Y轴 = 历史波动率 HV%<br>红虚线 = +2σ上限，橙虚线 = 均值<br>绿虚线 = -2σ下限<br>当前位置分位数 = HV在历史中位置<br>HV > 80%分位 = 波动率历史高位',
+  'localiv': '<b>历史IV</b><br>X轴 = 日期<br>Y轴 = 平值隐波 IV%（本地库真实）<br>红虚线 = +2σ，绿虚线 = -2σ<br>紫点 = 当前值+分位数<br>分位数 > 80 = 隐含偏高<br>分位数 < 20 = 隐含偏低',
+  'zscore': '<b>Z值走势</b><br>X轴 = 日期（30天）<br>Y轴 = 偏度标准化 Z值<br>±1.5 黄虚线 = 正常阈值<br>±2.0 红虚线 = 异常线<br>|Z| > 1.5 = 偏度偏离 1.5σ<br>|Z| > 2.0 = 异常信号（套利机会）'
+};
+
+function showChartHelp(tab) {
+  let modal = document.getElementById('chartHelpModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'chartHelpModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = '<div style="background:#FFF;padding:24px 32px;border-radius:6px;max-width:520px;font-size:14px;line-height:1.8;color:#333;box-shadow:0 8px 32px rgba(0,0,0,0.2);"><div id="chartHelpContent"></div><div style="margin-top:16px;text-align:right;"><button onclick="document.getElementById(\'chartHelpModal\').remove()" style="padding:6px 16px;background:#3498DB;color:#FFF;border:none;border-radius:4px;cursor:pointer;">关闭</button></div></div>';
+    modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+    document.body.appendChild(modal);
+  }
+  document.getElementById('chartHelpContent').innerHTML = chartHelpTexts[tab] || '暂无说明';
+}
+
+function switchLots(n) {
+  currentLots = n;
+  document.querySelectorAll('.lot-btn').forEach(b => b.classList.remove('active'));
+  (event||window.event).target.classList.add('active');
+  renderPnlChart(currentDetail?.skew_data || {}, currentDetail?.option_chain || {}, currentDetail?.history || []);
+}
+
+// ── 手动刷新 ──
+async function manualRefresh() {
+  document.getElementById('statusText').textContent = '重新加载快照...';
+  await fetchOverview();
+}
+
+// ── 声音 ──
+function toggleSound() {
+  soundEnabled = !soundEnabled;
+  document.getElementById('soundBtn').textContent = soundEnabled ? '🔊 声音提醒' : '🔇 已静音';
+}
+
+// ── 自选列表 ──
+function loadWatchlist() {
+  try {
+    return JSON.parse(localStorage.getItem('skew_watchlist') || '[]');
+  } catch(e) { return []; }
+}
+
+function saveWatchlist(list) {
+  localStorage.setItem('skew_watchlist', JSON.stringify(list));
+}
+
+function toggleWatchlist(product) {
+  let wl = loadWatchlist();
+  const idx = wl.indexOf(product);
+  if (idx >= 0) {
+    wl.splice(idx, 1);
+  } else {
+    wl.push(product);
+  }
+  saveWatchlist(wl);
+  updateWatchlistBtn(product);
+}
+
+function updateWatchlistBtn(product) {
+  const btn = document.getElementById('wlBtn');
+  if (!btn) return;
+  const wl = loadWatchlist();
+  if (wl.includes(product)) {
+    btn.textContent = '⭐ 取消自选';
+    btn.style.background = '#FFF3CD';
+  } else {
+    btn.textContent = '☆ 加入自选';
+    btn.style.background = '';
+  }
+  renderWatchlistBar();  // 自选变动后刷新监控栏
+}
+
+// ── 自选监控栏渲染 ──
+function renderWatchlistBar() {
+  var bar = document.getElementById('watchlistBar');
+  if (!bar) return;
+  var wl = loadWatchlist();
+  if (!wl.length) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  var html = '';
+  for (var i = 0; i < wl.length; i++) {
+    var code = wl[i];
+    var p = allProducts.find(function(x) { return x.product === code; });
+    if (!p || p.status !== 'ready') continue;
+    var z = p.z_score || 0, absZ = Math.abs(z);
+    var skew = p.iv_skew || 0, absSk = Math.abs(skew);
+    var zOk = absZ >= 1.5, skOk = absSk > 6.0;
+    var ivPct = p.local_iv_percentile != null ? p.local_iv_percentile : (p.iv_percentile || 50);
+    var ivOk = ivPct > 50, dte = p.dte || 0;
+    // 开仓条件命中情况
+    var entryTags = '';
+    entryTags += '<span class="wl-tag ' + (zOk ? 'entry-triggered' : 'entry-partial') + '">Z ' + z.toFixed(2) + '</span>';
+    entryTags += '<span class="wl-tag ' + (skOk ? 'entry-triggered' : 'entry-partial') + '">Sk ' + absSk.toFixed(1) + '%</span>';
+    entryTags += '<span class="wl-tag ' + (ivOk ? 'entry-triggered' : 'entry-partial') + '">IV ' + ivPct.toFixed(0) + '%</span>';
+    // 持仓状态 (从 localStorage 读入场快照)
+    var posKey = 'skew_pos_' + code;
+    var posData = null;
+    try { posData = JSON.parse(localStorage.getItem(posKey)); } catch(e) {}
+    var posTag = '';
+    if (posData && posData.status === 'holding') {
+      var entrySk = parseFloat(posData.entrySkew);
+      var curSk = absSk;
+      var tpSkew = curSk <= 2.0;
+      var tpZ = absZ <= 0.5;
+      if (tpSkew || tpZ) {
+        posTag = '<span class="wl-tag tp-alert">止盈</span>';
+      } else if (absZ >= 2.5 || dte < 5) {
+        posTag = '<span class="wl-tag stop-alert">止损</span>';
+      } else {
+        posTag = '<span class="wl-tag" style="background:#3498DB;color:#FFF;">持仓</span>';
+      }
+    } else if (zOk && skOk && ivOk) {
+      posTag = '<span class="wl-tag entry-triggered">可开仓</span>';
+    }
+    html += '<div class="wl-card" onclick="openPanel(\'' + code + '\')">';
+    html += '<span class="wl-name">' + esc(p.display_name || code) + '</span>';
+    html += '<span class="wl-price">' + ((p.underlying_price||0)<1000?(p.underlying_price||0).toFixed(2):(p.underlying_price||0).toFixed(0)) + '</span>';
+    html += entryTags;
+    html += '<span style="color:#7F8C8D;">DTE ' + dte + 'd</span>';
+    if (posTag) html += posTag;
+    html += '</div>';
+  }
+  bar.innerHTML = html || '<span class="wl-empty">⭐ 自选品种暂无数据，等待刷新...</span>';
+}
+
+// ── CSV导出 ──
+function exportCSV(product) {
+  if (!currentDetail) return;
+  const d = currentDetail.skew_data || {};
+  const chain = currentDetail.option_chain || {};
+
+  let csv = '品种,偏度类型,远月合约,近月合约,标的最新价,流动性,配对IVs(购/沽),IV_Skew,Z值,Z来源,IV分位,偏度百分位,到期天,远月配对IVs(购/沽),远月IV_Skew,跨月差,远月Z,远月Z来源,远月到期天,远月平值隐波,平值隐波,隐波变化,实波,溢价,套利方向,辅助信号,推荐等级\n';
+  const pairIVs = `${d.call_iv_25d||0}/${d.put_iv_25d||0}`;
+  const farPairIVs = (d.call_iv_25d_far!=null && d.put_iv_25d_far!=null) ? `${d.call_iv_25d_far}/${d.put_iv_25d_far}` : '';
+  csv += [
+    d.product, d.sector||'', d.futures_code, d.near_month_code||'', d.underlying_price,
+    d.liquidity||'', pairIVs, d.iv_skew, d.z_score, d.z_source||'',
+    d.local_iv_percentile!=null?d.local_iv_percentile:d.iv_percentile, d.skew_percentile,
+    d.dte,
+    farPairIVs, d.iv_skew_far!=null?d.iv_skew_far:'',
+    // 跨月差优先用配对级 d.spread (按各自 Delta 算的近月−远月), fallback 到 product 级 p.skew_spread
+    (d.spread!=null?d.spread:(d.skew_spread!=null?d.skew_spread:'')),
+    d.z_score_far!=null?d.z_score_far:'', d.z_source_far||'',
+    d.dte_far!=null?d.dte_far:'', d.atm_iv_far!=null?d.atm_iv_far:'',
+    d.atm_iv, d.iv_change!=null?d.iv_change:'', d.underlying_hv, d.premium!=null?d.premium:'',
+    d.direction||'', (d.aux_signals||[]).join('|'), d.recommend||''
+  ].join(',') + '\n\n';
+
+  csv += '期权链\n';
+  csv += '行权价,方向,IV,Delta,成交量,流动性\n';
+  (chain.calls||[]).forEach(c => {
+    csv += `${c.strike},CALL,${c.iv},${c.delta},${c.volume},${c.liquidity}\n`;
+  });
+  (chain.puts||[]).forEach(p => {
+    csv += `${p.strike},PUT,${p.iv},${p.delta},${p.volume},${p.liquidity}\n`;
+  });
+
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${product}_skew_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── 表头字段说明 tooltip ──
+(function initHeaderTooltips() {
+  const tip = document.createElement('div');
+  tip.className = 'th-tooltip';
+  document.body.appendChild(tip);
+
+  function positionTooltip(th) {
+    const rect = th.getBoundingClientRect();
+    const tipRect = tip.getBoundingClientRect();
+    let top = rect.bottom + 6;
+    let left = rect.left + rect.width / 2 - tipRect.width / 2;
+    if (left + tipRect.width > window.innerWidth - 8) {
+      left = window.innerWidth - tipRect.width - 8;
+    }
+    if (left < 8) left = 8;
+    tip.style.top = top + 'px';
+    tip.style.left = left + 'px';
+  }
+
+  document.querySelectorAll('table.main-table th[data-tooltip]').forEach(th => {
+    th.addEventListener('mouseenter', () => {
+      tip.textContent = th.dataset.tooltip;
+      tip.classList.add('visible');
+      positionTooltip(th);
+    });
+    th.addEventListener('mouseleave', () => {
+      tip.classList.remove('visible');
+    });
+  });
+})();
+
+// ── 窗口resize ──
+window.addEventListener('resize', () => {
+  Object.values(chartInstances).forEach(c => c.resize());
+});
+</script>
+</body>
+</html>
