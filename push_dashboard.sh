@@ -18,5 +18,15 @@ fi
 
 git add -A
 git commit -q -m "snapshot $(date +%F_%H%M)"
-git push -q
-echo "推送完成: $(git rev-parse --short HEAD)"
+
+# 推送重试(容错瞬时网络故障), 最多 3 次
+for attempt in 1 2 3; do
+  if git push -q; then
+    echo "推送完成: $(git rev-parse --short HEAD)"
+    exit 0
+  fi
+  echo "  push 失败(第 $attempt 次), 5s 后重试..."
+  sleep 5
+done
+echo "推送失败: 已达最大重试次数"
+exit 1
